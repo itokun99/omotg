@@ -21,22 +21,24 @@ type BotConfig struct {
 
 // Bot handles incoming Telegram webhooks and forwards commands to OpenCode.
 type Bot struct {
-	config     *BotConfig
-	ocClient   *OCClient
-	sessions   *SessionMap
-	httpClient *http.Client
+	config      *BotConfig
+	ocClient    *OCClient
+	sessions    *SessionMap
+	topicClient *TopicClient
+	httpClient  *http.Client
 }
 
 // NewBot creates a new Bot handler.
-func NewBot(cfg *BotConfig, ocClient *OCClient, sessions *SessionMap) *Bot {
+func NewBot(cfg *BotConfig, ocClient *OCClient, sessions *SessionMap, topicClient *TopicClient) *Bot {
 	if len(cfg.AllowedChatIDs) == 0 {
 		slog.Warn("NewBot: no AllowedChatIDs configured — ALL chats are allowed")
 	}
 	return &Bot{
-		config:     cfg,
-		ocClient:   ocClient,
-		sessions:   sessions,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		config:      cfg,
+		ocClient:    ocClient,
+		sessions:    sessions,
+		topicClient: topicClient,
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -52,9 +54,11 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	var update struct {
 		UpdateID int `json:"update_id"`
 		Message  *struct {
-			MessageID int64       `json:"message_id"`
-			Chat      TelegramChat `json:"chat"`
-			Text      string       `json:"text,omitempty"`
+			MessageID       int64        `json:"message_id"`
+			MessageThreadID int64        `json:"message_thread_id,omitempty"`
+			Chat            TelegramChat `json:"chat"`
+			Text            string       `json:"text,omitempty"`
+			IsTopicMessage  bool         `json:"is_topic_message,omitempty"`
 		} `json:"message,omitempty"`
 	}
 
@@ -77,7 +81,7 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Whitelist check
 	if !b.isChatAllowed(chatID) {
 		slog.Warn("webhook: chat not allowed", "chat_id", chatID)
-		b.sendTelegram(chatID, "Maaf, kamu tidak punya akses.")
+		b.sendTelegram(chatID, 0, "Maaf, kamu tidak punya akses.")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -88,17 +92,17 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Handle system commands locally
 	switch cmd.Type {
 	case CmdStart:
-		b.sendTelegram(chatID, "🤖 Halo! Saya OMOTG, jembatan Telegram ke OpenCode. Kirim /help untuk bantuan.")
+		b.sendTelegram(chatID, 0, "🤖 Halo! Saya OMOTG, jembatan Telegram ke OpenCode. Kirim /help untuk bantuan.")
 		w.WriteHeader(http.StatusOK)
 		return
 
 	case CmdHelp:
-		b.sendTelegram(chatID, HelpText())
+		b.sendTelegram(chatID, 0, HelpText())
 		w.WriteHeader(http.StatusOK)
 		return
 
 	case CmdUnknown:
-		b.sendTelegram(chatID, "Perintah tidak dikenal. Chat bebas juga bisa loh. Kirim /help untuk bantuan.")
+		b.sendTelegram(chatID, 0, "Perintah tidak dikenal. Chat bebas juga bisa loh. Kirim /help untuk bantuan.")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -110,33 +114,55 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := b.ocClient.CreateSession(ctx)
 	if err != nil {
 		slog.Error("webhook: create session", "error", err)
-		b.sendTelegram(chatID, "❌ OpenCode server sedang tidak tersedia. Coba lagi nanti.")
+		b.sendTelegram(chatID, 0, "❌ OpenCode server sedang tidak tersedia. Coba lagi nanti.")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// Store session-chat association
-	b.sessions.Store(sessionID, chatID, b.config.SessionTimeout)
+	// Determine thread ID (forum topic) for this session
+	threadID := update.Message.MessageThreadID
+	chatType := update.Message.Chat.Type
+	isForum := (chatType == "supergroup" || chatType == "group")
+
+	// If message is in a group with forum topics but NOT in a topic yet, create one
+	if isForum && threadID == 0 {
+		topicName := fmt.Sprintf("OMOTG-%.6s", sessionID)
+		createdID, err := b.topicClient.CreateForumTopic(chatID, topicName)
+		if err != nil {
+			slog.Error("webhook: create forum topic", "error", err, "chat_id", chatID)
+			b.sendTelegram(chatID, 0, "⚠️ Tidak bisa membuat topic baru. Kirim pesan di topic yang sudah ada.")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		threadID = createdID
+		slog.Info("webhook: created forum topic", "chat_id", chatID, "topic_id", threadID, "topic_name", topicName)
+	}
+
+	// Store session-chat-topic association
+	b.sessions.Store(sessionID, chatID, threadID, b.config.SessionTimeout)
 
 	// Send acknowledgment
 	ackText := fmt.Sprintf("⏳ Memproses... (session: `%s`)", sessionID)
+	if threadID > 0 {
+		ackText = fmt.Sprintf("⏳ Memproses... (topic: %d, session: `%s`)", threadID, sessionID)
+	}
 	if cmd.Type == CmdDeploy {
 		ackText = fmt.Sprintf("🚀 Menjalankan: `%s`", cmd.RawText)
 	}
-	b.sendTelegram(chatID, ackText)
+	b.sendTelegram(chatID, threadID, ackText)
 
 	// Send message to OpenCode (async — don't block webhook response)
 	go func() {
 		if err := b.ocClient.SendMessage(context.Background(), sessionID, cmd.Prompt); err != nil {
 			slog.Error("webhook: send message to OpenCode", "error", err, "session_id", sessionID)
-			b.sendTelegram(chatID, fmt.Sprintf("❌ Gagal mengirim perintah ke OpenCode: %s", err))
+			b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal mengirim perintah ke OpenCode: %s", err))
 			b.sessions.Delete(sessionID)
 			return
 		}
 	}()
 
 	// Start streaming events in background
-	go b.streamSessionEvents(sessionID, chatID)
+	go b.streamSessionEvents(sessionID, chatID, threadID)
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
@@ -144,7 +170,7 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 // streamSessionEvents subscribes to the OpenCode SSE stream and forwards
 // matching session events to the Telegram chat.
-func (b *Bot) streamSessionEvents(sessionID string, chatID int64) {
+func (b *Bot) streamSessionEvents(sessionID string, chatID int64, threadID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), b.config.SessionTimeout)
 	defer cancel()
 	defer b.sessions.Delete(sessionID)
@@ -152,13 +178,13 @@ func (b *Bot) streamSessionEvents(sessionID string, chatID int64) {
 	events, err := b.ocClient.SubscribeEvents(ctx)
 	if err != nil {
 		slog.Error("stream: subscribe error", "session_id", sessionID, "error", err)
-		b.sendTelegram(chatID, "❌ Gagal subscribe ke event stream OpenCode.")
+		b.sendTelegram(chatID, threadID, "❌ Gagal subscribe ke event stream OpenCode.")
 		return
 	}
 
 	var (
-		buf         strings.Builder
-		seenDelta   bool
+		buf          strings.Builder
+		seenDelta    bool
 		fallbackText string // last "text" event content (assistant response, captured after first delta)
 	)
 
@@ -183,15 +209,15 @@ func (b *Bot) streamSessionEvents(sessionID string, chatID int64) {
 			if msg == "" {
 				msg = "Unknown error"
 			}
-			b.sendTelegram(chatID, fmt.Sprintf("❌ Error: %s", msg))
+			b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Error: %s", msg))
 		case "done":
 			accumulated := strings.TrimSpace(buf.String())
 			if accumulated != "" {
-				b.sendTelegram(chatID, accumulated)
+				b.sendTelegram(chatID, threadID, accumulated)
 			} else if fallbackText != "" {
-				b.sendTelegram(chatID, fallbackText)
+				b.sendTelegram(chatID, threadID, fallbackText)
 			}
-			b.sendTelegram(chatID, "✅ Selesai!")
+			b.sendTelegram(chatID, threadID, "✅ Selesai!")
 			return
 		}
 	}
@@ -213,11 +239,13 @@ func (b *Bot) isChatAllowed(chatID int64) bool {
 
 // TelegramChat represents a chat entity from Telegram updates.
 type TelegramChat struct {
-	ID int64 `json:"id"`
+	ID   int64  `json:"id"`
+	Type string `json:"type,omitempty"` // "private", "group", "supergroup"
 }
 
 // sendTelegram sends a text message to a Telegram chat via the Bot API.
-func (b *Bot) sendTelegram(chatID int64, text string) {
+// If threadID > 0, the message is sent to that forum topic.
+func (b *Bot) sendTelegram(chatID int64, threadID int64, text string) {
 	if b.config.BotToken == "" {
 		slog.Error("sendTelegram: bot token not set")
 		return
@@ -226,6 +254,9 @@ func (b *Bot) sendTelegram(chatID int64, text string) {
 	payload := map[string]interface{}{
 		"chat_id": chatID,
 		"text":    text,
+	}
+	if threadID > 0 {
+		payload["message_thread_id"] = threadID
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

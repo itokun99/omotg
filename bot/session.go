@@ -10,6 +10,7 @@ import (
 // SessionInfo holds metadata about an active session.
 type SessionInfo struct {
 	ChatID    int64
+	ThreadID  int64 // Telegram forum topic ID; 0 means no topic (private chat or non-forum group)
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
@@ -28,11 +29,13 @@ func NewSessionMap() *SessionMap {
 	}
 }
 
-// Store associates a session ID with a chat ID for the given duration.
-func (sm *SessionMap) Store(sessionID string, chatID int64, timeout time.Duration) {
+// Store associates a session ID with a chat ID and optional forum thread ID
+// for the given duration.
+func (sm *SessionMap) Store(sessionID string, chatID int64, threadID int64, timeout time.Duration) {
 	now := time.Now()
 	info := SessionInfo{
 		ChatID:    chatID,
+		ThreadID:  threadID,
 		CreatedAt: now,
 		ExpiresAt: now.Add(timeout),
 	}
@@ -44,6 +47,7 @@ func (sm *SessionMap) Store(sessionID string, chatID int64, timeout time.Duratio
 	slog.Debug("session stored",
 		"session_id", sessionID,
 		"chat_id", chatID,
+		"thread_id", threadID,
 		"expires_at", info.ExpiresAt,
 	)
 }
@@ -72,10 +76,11 @@ func (sm *SessionMap) Load(sessionID string) (SessionInfo, bool) {
 //
 // Deprecated: Use Store instead. OpenCode supports multiple concurrent sessions
 // per chat, so the 1:1 constraint has been removed.
-func (sm *SessionMap) StoreIfNotExists(sessionID string, chatID int64, timeout time.Duration) bool {
+func (sm *SessionMap) StoreIfNotExists(sessionID string, chatID int64, threadID int64, timeout time.Duration) bool {
 	now := time.Now()
 	info := SessionInfo{
 		ChatID:    chatID,
+		ThreadID:  threadID,
 		CreatedAt: now,
 		ExpiresAt: now.Add(timeout),
 	}
@@ -87,6 +92,7 @@ func (sm *SessionMap) StoreIfNotExists(sessionID string, chatID int64, timeout t
 	slog.Debug("session stored (if not exists — always succeeds)",
 		"session_id", sessionID,
 		"chat_id", chatID,
+		"thread_id", threadID,
 		"expires_at", info.ExpiresAt,
 	)
 	return true

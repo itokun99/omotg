@@ -39,6 +39,9 @@ func main() {
 	// Create session map.
 	sessions := bot.NewSessionMap()
 
+	// Create TopicClient for forum topics.
+	topicClient := bot.NewTopicClient(cfg.TelegramBotToken)
+
 	// Create bot handler.
 	botCfg := &bot.BotConfig{
 		SecretToken:    cfg.SecretToken,
@@ -46,7 +49,7 @@ func main() {
 		SessionTimeout: time.Duration(cfg.SessionTimeout) * time.Second,
 		BotToken:       cfg.TelegramBotToken,
 	}
-	bh := bot.NewBot(botCfg, ocClient, sessions)
+	bh := bot.NewBot(botCfg, ocClient, sessions, topicClient)
 
 	if len(cfg.AllowedChatIDs) == 0 {
 		slog.Warn("no AllowedChatIDs configured — ALL chats are allowed")

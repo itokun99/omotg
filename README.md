@@ -9,6 +9,7 @@ OMOTG is a Go-based bidirectional bridge that connects **Telegram** to **OpenCod
 - **📦 Zero Dependencies** — Pure Go standard library, no external packages
 - **🔒 Secure** — Secret token verification, chat ID whitelist, self-signed TLS cert for webhook
 - **🧵 Session Management** — Thread-safe session store with auto-expiry and cleanup
+- **💬 Group & Forum Topics** — Supports Telegram supergroup forum topics; auto-creates a new topic per session
 - **🧹 Auto Cleanup** — Expired sessions cleaned every 5 minutes
 - **📋 Systemd Integration** — Ships with systemd user service files for auto-start
 
@@ -175,6 +176,16 @@ Configuration is via environment variables in `~/.config/omotg/env`:
 | `/logs [N]` | Show last N lines of server logs (default: 50) |
 
 Any non-command message is forwarded to OpenCode as a free-form chat.
+
+### Group & Forum Topics
+
+OMOTG supports **Telegram supergroup forum topics**. When sending a message to a group with forum topics enabled:
+
+- **Message in a topic** — OMOTG replies in the same topic thread
+- **Message in General** — OMOTG auto-creates a new forum topic named `OMOTG-<session_id>` and replies there
+- **Private chat** — works as before, no topic behavior
+
+Each OpenCode session gets its own topic, keeping conversations organized in busy groups. Topic creation failure sends an error to the General thread.
 
 ### MCP Tools
 
