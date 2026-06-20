@@ -115,15 +115,8 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Map session → chat atomically (rejects if an active session already exists)
-	if !b.sessions.StoreIfNotExists(sessionID, chatID, b.config.SessionTimeout) {
-		msg := fmt.Sprintf("⚠️ Masih ada session aktif. Tunggu selesai atau timeout %d detik.",
-			int(b.config.SessionTimeout.Seconds()))
-		b.sendTelegram(chatID, msg)
-		slog.Info("webhook: chat already has active session", "chat_id", chatID)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
+	// Store session-chat association
+	b.sessions.Store(sessionID, chatID, b.config.SessionTimeout)
 
 	// Send acknowledgment
 	ackText := fmt.Sprintf("⏳ Memproses... (session: `%s`)", sessionID)

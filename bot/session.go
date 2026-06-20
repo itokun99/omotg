@@ -17,16 +17,14 @@ type SessionInfo struct {
 // SessionMap provides a thread-safe mapping between session IDs and chat IDs
 // with automatic expiration support.
 type SessionMap struct {
-	mu            sync.RWMutex
-	data          map[string]SessionInfo
-	chatToSession map[int64]string
+	mu   sync.RWMutex
+	data map[string]SessionInfo
 }
 
 // NewSessionMap creates a new empty SessionMap.
 func NewSessionMap() *SessionMap {
 	return &SessionMap{
-		data:          make(map[string]SessionInfo),
-		chatToSession: make(map[int64]string),
+		data: make(map[string]SessionInfo),
 	}
 }
 
@@ -41,7 +39,6 @@ func (sm *SessionMap) Store(sessionID string, chatID int64, timeout time.Duratio
 
 	sm.mu.Lock()
 	sm.data[sessionID] = info
-	sm.chatToSession[chatID] = sessionID
 	sm.mu.Unlock()
 
 	slog.Debug("session stored",
@@ -70,67 +67,36 @@ func (sm *SessionMap) Load(sessionID string) (SessionInfo, bool) {
 	return info, true
 }
 
-// GetSessionIDByChat performs a reverse lookup from chat ID to session ID.
-// Returns false if no active session exists for the chat.
-func (sm *SessionMap) GetSessionIDByChat(chatID int64) (string, bool) {
-	sm.mu.RLock()
-	sessionID, ok := sm.chatToSession[chatID]
-	sm.mu.RUnlock()
-
-	if !ok {
-		return "", false
-	}
-
-	// Verify the session hasn't expired.
-	sm.mu.RLock()
-	info, ok := sm.data[sessionID]
-	sm.mu.RUnlock()
-
-	if !ok || time.Now().After(info.ExpiresAt) {
-		slog.Debug("session expired on chat lookup",
-			"chat_id", chatID,
-			"session_id", sessionID,
-		)
-		return "", false
-	}
-
-	return sessionID, true
-}
-
 // StoreIfNotExists atomically stores a session only if no active session exists for the chat.
 // Returns true if the session was stored, false if the chat already has an active session.
+//
+// Deprecated: Use Store instead. OpenCode supports multiple concurrent sessions
+// per chat, so the 1:1 constraint has been removed.
 func (sm *SessionMap) StoreIfNotExists(sessionID string, chatID int64, timeout time.Duration) bool {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if existingSID, ok := sm.chatToSession[chatID]; ok {
-		if info, exists := sm.data[existingSID]; exists && !time.Now().After(info.ExpiresAt) {
-			return false // chat still has an active session
-		}
-	}
-
 	now := time.Now()
-	sm.data[sessionID] = SessionInfo{
+	info := SessionInfo{
 		ChatID:    chatID,
 		CreatedAt: now,
 		ExpiresAt: now.Add(timeout),
 	}
-	sm.chatToSession[chatID] = sessionID
 
-	slog.Debug("session stored (if not exists)",
+	sm.mu.Lock()
+	sm.data[sessionID] = info
+	sm.mu.Unlock()
+
+	slog.Debug("session stored (if not exists — always succeeds)",
 		"session_id", sessionID,
 		"chat_id", chatID,
-		"expires_at", now.Add(timeout),
+		"expires_at", info.ExpiresAt,
 	)
 	return true
 }
 
-// Delete removes a session from both maps.
+// Delete removes a session from the map.
 func (sm *SessionMap) Delete(sessionID string) {
 	sm.mu.Lock()
 	info, ok := sm.data[sessionID]
 	if ok {
-		delete(sm.chatToSession, info.ChatID)
 		delete(sm.data, sessionID)
 	}
 	sm.mu.Unlock()
@@ -164,7 +130,6 @@ func (sm *SessionMap) CleanupExpired() {
 	sm.mu.Lock()
 	for sessionID, info := range sm.data {
 		if now.After(info.ExpiresAt) {
-			delete(sm.chatToSession, info.ChatID)
 			delete(sm.data, sessionID)
 			slog.Debug("expired session cleaned up",
 				"session_id", sessionID,
