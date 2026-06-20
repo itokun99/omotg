@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -50,7 +53,7 @@ func main() {
 	}
 
 	// Register Telegram webhook on startup.
-	if err := registerWebhook(cfg.TelegramBotToken, cfg.WebhookURL, cfg.SecretToken); err != nil {
+	if err := registerWebhook(cfg.TelegramBotToken, cfg.WebhookURL, cfg.SecretToken, cfg.TLSCertFile); err != nil {
 		slog.Warn("webhook registration failed (will retry)", "error", err)
 	} else {
 		slog.Info("webhook registered", "url", cfg.WebhookURL)
@@ -95,8 +98,8 @@ func main() {
 	errCh := make(chan error, 2)
 
 	go func() {
-		slog.Info("webhook server listening", "addr", whServer.Addr)
-		if err := whServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Info("webhook server listening (TLS)", "addr", whServer.Addr)
+		if err := whServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("webhook: %w", err)
 		}
 	}()
@@ -132,26 +135,47 @@ func main() {
 	slog.Info("omotg stopped")
 }
 
-// registerWebhook calls Telegram setWebhook API to register the webhook URL.
-func registerWebhook(token, url, secret string) error {
-	payload := map[string]string{
-		"url": url,
-	}
-	if secret != "" {
-		payload["secret_token"] = secret
-	}
+func registerWebhook(token, url, secret, certFile string) error {
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/setWebhook", token)
 
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
+	var body io.Reader
+	var contentType string
+
+	if certFile != "" {
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		w.WriteField("url", url)
+		if secret != "" {
+			w.WriteField("secret_token", secret)
+		}
+		certPath, _ := filepath.Abs(certFile)
+		f, err := os.Open(certPath)
+		if err != nil {
+			return fmt.Errorf("open cert %s: %w", certPath, err)
+		}
+		defer f.Close()
+		fw, err := w.CreateFormFile("certificate", filepath.Base(certPath))
+		if err != nil {
+			return fmt.Errorf("create form file: %w", err)
+		}
+		if _, err := io.Copy(fw, f); err != nil {
+			return fmt.Errorf("copy cert: %w", err)
+		}
+		w.Close()
+		body = &buf
+		contentType = w.FormDataContentType()
+	} else {
+		payload := map[string]string{"url": url}
+		if secret != "" {
+			payload["secret_token"] = secret
+		}
+		b, _ := json.Marshal(payload)
+		body = bytes.NewReader(b)
+		contentType = "application/json"
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(
-		fmt.Sprintf("https://api.telegram.org/bot%s/setWebhook", token),
-		"application/json",
-		bytes.NewReader(body),
-	)
+	resp, err := client.Post(apiURL, contentType, body)
 	if err != nil {
 		return fmt.Errorf("http call: %w", err)
 	}

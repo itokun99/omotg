@@ -17,14 +17,22 @@ type Config struct {
 	MCPPort          string
 	AllowedChatIDs   []int64
 	SessionTimeout   int // seconds
+	TLSCertFile      string
+	TLSKeyFile       string
 }
 
 func LoadConfig() (*Config, error) {
+	home, _ := os.UserHomeDir()
+	defaultCert := home + "/.config/omotg/webhook.crt"
+	defaultKey := home + "/.config/omotg/webhook.key"
+
 	cfg := &Config{
 		OpenCodeURL:    envOrDefault("OPENCODE_SERVER_URL", "http://127.0.0.1:4096"),
 		WebhookPort:    envOrDefault("OMOTG_WEBHOOK_PORT", "8443"),
 		MCPPort:        envOrDefault("OMOTG_MCP_PORT", "9090"),
 		SessionTimeout: 300,
+		TLSCertFile:    envOrDefault("OMOTG_TLS_CERT_FILE", defaultCert),
+		TLSKeyFile:     envOrDefault("OMOTG_TLS_KEY_FILE", defaultKey),
 	}
 
 	var missing []string
