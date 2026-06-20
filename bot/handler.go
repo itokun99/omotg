@@ -163,7 +163,11 @@ func (b *Bot) streamSessionEvents(sessionID string, chatID int64) {
 		return
 	}
 
-	var buf strings.Builder
+	var (
+		buf         strings.Builder
+		seenDelta   bool
+		fallbackText string // last "text" event content (assistant response, captured after first delta)
+	)
 
 	for ev := range events {
 		if ev.SessionID != sessionID {
@@ -172,11 +176,14 @@ func (b *Bot) streamSessionEvents(sessionID string, chatID int64) {
 
 		switch ev.Type {
 		case "delta":
+			seenDelta = true
 			buf.WriteString(ev.Content)
 		case "text":
-			msg := ev.Content
-			if msg != "" {
-				b.sendTelegram(chatID, msg)
+			// OpenCode echoes the user's message as a "text" event before any
+			// delta events. Skip those. After the first delta, "text" events
+			// are the assistant's final part — use as fallback.
+			if seenDelta {
+				fallbackText = ev.Content
 			}
 		case "error":
 			msg := ev.Content
@@ -188,6 +195,8 @@ func (b *Bot) streamSessionEvents(sessionID string, chatID int64) {
 			accumulated := strings.TrimSpace(buf.String())
 			if accumulated != "" {
 				b.sendTelegram(chatID, accumulated)
+			} else if fallbackText != "" {
+				b.sendTelegram(chatID, fallbackText)
 			}
 			b.sendTelegram(chatID, "✅ Selesai!")
 			return
