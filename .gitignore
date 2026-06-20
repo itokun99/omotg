@@ -1,0 +1,17 @@
+# Binary
+/omotg
+
+# Environment file (contains secrets)
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
