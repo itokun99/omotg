@@ -15,3 +15,7 @@ Thumbs.db
 
 # Go
 vendor/
+
+# TLS certificates (generated per-deployment)
+*.crt
+*.key
