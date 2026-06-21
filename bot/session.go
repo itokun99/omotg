@@ -2,146 +2,204 @@ package bot
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 )
 
-// SessionInfo holds metadata about an active session.
-type SessionInfo struct {
+// SessionEntry holds metadata about an active session.
+type SessionEntry struct {
+	SessionID string
 	ChatID    int64
 	ThreadID  int64 // Telegram forum topic ID; 0 means no topic (private chat or non-forum group)
 	CreatedAt time.Time
-	ExpiresAt time.Time
+	LastUsed  time.Time
 }
 
-// SessionMap provides a thread-safe mapping between session IDs and chat IDs
-// with automatic expiration support.
+// SessionMap provides a thread-safe mapping for multiple sessions per chat
+// with topic-based routing for group conversations.
 type SessionMap struct {
-	mu   sync.RWMutex
-	data map[string]SessionInfo
+	mu          sync.RWMutex
+	entries     map[string]*SessionEntry // sessionID → entry
+	chatCurrent map[int64]string         // chatID → current sessionID (private chat)
+	topicBind   map[string]string        // "chatID:threadID" → sessionID (group topics)
 }
 
 // NewSessionMap creates a new empty SessionMap.
 func NewSessionMap() *SessionMap {
 	return &SessionMap{
-		data: make(map[string]SessionInfo),
+		entries:     make(map[string]*SessionEntry),
+		chatCurrent: make(map[int64]string),
+		topicBind:   make(map[string]string),
 	}
 }
 
-// Store associates a session ID with a chat ID and optional forum thread ID
-// for the given duration.
-func (sm *SessionMap) Store(sessionID string, chatID int64, threadID int64, timeout time.Duration) {
+// Store adds or updates a session entry.
+// For private chat (threadID == 0), this also sets the session as "current".
+// For group topics (threadID > 0), this binds the session to the topic.
+// The timeout parameter is kept for backward compatibility but ignored
+// — sessions persist until explicitly deleted.
+func (sm *SessionMap) Store(sessionID string, chatID int64, threadID int64, _ time.Duration) {
 	now := time.Now()
-	info := SessionInfo{
-		ChatID:    chatID,
-		ThreadID:  threadID,
-		CreatedAt: now,
-		ExpiresAt: now.Add(timeout),
-	}
 
 	sm.mu.Lock()
-	sm.data[sessionID] = info
+	if existing, ok := sm.entries[sessionID]; ok {
+		existing.ChatID = chatID
+		existing.ThreadID = threadID
+		existing.LastUsed = now
+	} else {
+		sm.entries[sessionID] = &SessionEntry{
+			SessionID: sessionID,
+			ChatID:    chatID,
+			ThreadID:  threadID,
+			CreatedAt: now,
+			LastUsed:  now,
+		}
+	}
+
+	if threadID == 0 {
+		// Private chat: set as current session
+		sm.chatCurrent[chatID] = sessionID
+	} else {
+		// Group topic: bind session to topic
+		key := topicKey(chatID, threadID)
+		sm.topicBind[key] = sessionID
+	}
 	sm.mu.Unlock()
 
 	slog.Debug("session stored",
 		"session_id", sessionID,
 		"chat_id", chatID,
 		"thread_id", threadID,
-		"expires_at", info.ExpiresAt,
 	)
 }
 
-// Load retrieves session info by session ID. Returns false if the session
-// does not exist or has expired.
-func (sm *SessionMap) Load(sessionID string) (SessionInfo, bool) {
+// Load retrieves a session entry by ID. Returns false if not found.
+func (sm *SessionMap) Load(sessionID string) (*SessionEntry, bool) {
 	sm.mu.RLock()
-	info, ok := sm.data[sessionID]
+	entry, ok := sm.entries[sessionID]
 	sm.mu.RUnlock()
-
 	if !ok {
-		return SessionInfo{}, false
+		return nil, false
 	}
-
-	if time.Now().After(info.ExpiresAt) {
-		slog.Debug("session expired on load", "session_id", sessionID)
-		return SessionInfo{}, false
-	}
-
-	return info, true
+	return entry, true
 }
 
-// StoreIfNotExists atomically stores a session only if no active session exists for the chat.
-// Returns true if the session was stored, false if the chat already has an active session.
-//
-// Deprecated: Use Store instead. OpenCode supports multiple concurrent sessions
-// per chat, so the 1:1 constraint has been removed.
-func (sm *SessionMap) StoreIfNotExists(sessionID string, chatID int64, threadID int64, timeout time.Duration) bool {
-	now := time.Now()
-	info := SessionInfo{
-		ChatID:    chatID,
-		ThreadID:  threadID,
-		CreatedAt: now,
-		ExpiresAt: now.Add(timeout),
-	}
-
-	sm.mu.Lock()
-	sm.data[sessionID] = info
-	sm.mu.Unlock()
-
-	slog.Debug("session stored (if not exists — always succeeds)",
-		"session_id", sessionID,
-		"chat_id", chatID,
-		"thread_id", threadID,
-		"expires_at", info.ExpiresAt,
-	)
-	return true
-}
-
-// Delete removes a session from the map.
+// Delete removes a session and cleans up all references to it.
 func (sm *SessionMap) Delete(sessionID string) {
 	sm.mu.Lock()
-	info, ok := sm.data[sessionID]
+	entry, ok := sm.entries[sessionID]
 	if ok {
-		delete(sm.data, sessionID)
+		delete(sm.entries, sessionID)
+		// Clean up chatCurrent reference
+		if sm.chatCurrent[entry.ChatID] == sessionID {
+			delete(sm.chatCurrent, entry.ChatID)
+		}
+		// Clean up topicBind reference
+		key := topicKey(entry.ChatID, entry.ThreadID)
+		if sm.topicBind[key] == sessionID {
+			delete(sm.topicBind, key)
+		}
 	}
 	sm.mu.Unlock()
 
 	if ok {
-		slog.Debug("session deleted", "session_id", sessionID, "chat_id", info.ChatID)
+		slog.Debug("session deleted", "session_id", sessionID, "chat_id", entry.ChatID)
 	}
 }
 
-// StartCleanup spawns a background goroutine that periodically removes expired sessions.
-// The goroutine exits when ctx is cancelled.
-func (sm *SessionMap) StartCleanup(ctx context.Context, interval time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				sm.CleanupExpired()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+// GetCurrentSession returns the current session for a private chat, or nil.
+func (sm *SessionMap) GetCurrentSession(chatID int64) *SessionEntry {
+	sm.mu.RLock()
+	sessionID, ok := sm.chatCurrent[chatID]
+	if !ok {
+		sm.mu.RUnlock()
+		return nil
+	}
+	entry, ok := sm.entries[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return entry
 }
 
-// CleanupExpired iterates over all sessions and removes any that have expired.
-func (sm *SessionMap) CleanupExpired() {
-	now := time.Now()
-
+// SetCurrentSession sets the current session for a private chat.
+func (sm *SessionMap) SetCurrentSession(chatID int64, sessionID string) {
 	sm.mu.Lock()
-	for sessionID, info := range sm.data {
-		if now.After(info.ExpiresAt) {
-			delete(sm.data, sessionID)
-			slog.Debug("expired session cleaned up",
-				"session_id", sessionID,
-				"chat_id", info.ChatID,
-			)
+	sm.chatCurrent[chatID] = sessionID
+	sm.mu.Unlock()
+}
+
+// GetTopicSession returns the session bound to a group topic, or nil.
+func (sm *SessionMap) GetTopicSession(chatID, threadID int64) *SessionEntry {
+	key := topicKey(chatID, threadID)
+	sm.mu.RLock()
+	sessionID, ok := sm.topicBind[key]
+	if !ok {
+		sm.mu.RUnlock()
+		return nil
+	}
+	entry, ok := sm.entries[sessionID]
+	sm.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return entry
+}
+
+// DeleteTopicBinding removes the session binding for a group topic.
+// The session entry itself is preserved but disassociated from the topic.
+func (sm *SessionMap) DeleteTopicBinding(chatID, threadID int64) {
+	key := topicKey(chatID, threadID)
+	sm.mu.Lock()
+	delete(sm.topicBind, key)
+	sm.mu.Unlock()
+}
+
+// ListChatSessions returns all sessions for a chat, newest last-used first.
+func (sm *SessionMap) ListChatSessions(chatID int64) []*SessionEntry {
+	sm.mu.RLock()
+	var result []*SessionEntry
+	for _, entry := range sm.entries {
+		if entry.ChatID == chatID {
+			result = append(result, entry)
 		}
 	}
+	sm.mu.RUnlock()
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].LastUsed.After(result[j].LastUsed)
+	})
+	return result
+}
+
+// Renew refreshes the last-used timestamp on a session.
+func (sm *SessionMap) Renew(sessionID string) {
+	sm.mu.Lock()
+	if entry, ok := sm.entries[sessionID]; ok {
+		entry.LastUsed = time.Now()
+	}
 	sm.mu.Unlock()
+}
+
+// StartCleanup is a no-op in the persistent design.
+// Sessions persist until explicitly deleted — OpenCode server handles
+// its own session timeouts internally.
+func (sm *SessionMap) StartCleanup(_ context.Context, _ time.Duration) {}
+
+// CleanupExpired is a no-op in the persistent design.
+func (sm *SessionMap) CleanupExpired() {}
+
+// topicKey builds a map key from chatID and threadID.
+func topicKey(chatID, threadID int64) string {
+	return fmt.Sprintf("%d:%d", chatID, threadID)
+}
+
+// StoreIfNotExists is deprecated. Use Store instead.
+func (sm *SessionMap) StoreIfNotExists(sessionID string, chatID int64, threadID int64, timeout time.Duration) bool {
+	sm.Store(sessionID, chatID, threadID, timeout)
+	return true
 }

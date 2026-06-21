@@ -34,23 +34,25 @@ func RegisterTelegramTools(s *Server, sender *TelegramSender) {
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"chat_id":    {Type: "string", Description: "Telegram chat ID"},
-					"text":       {Type: "string", Description: "Message text"},
-					"parse_mode": {Type: "string", Description: "Parse mode: HTML or MarkdownV2"},
+					"chat_id":           {Type: "string", Description: "Telegram chat ID"},
+					"text":              {Type: "string", Description: "Message text"},
+					"parse_mode":        {Type: "string", Description: "Parse mode: HTML or MarkdownV2"},
+					"message_thread_id": {Type: "string", Description: "Forum topic thread ID (optional)"},
 				},
 				Required: []string{"chat_id", "text"},
 			},
 		},
 		func(ctx context.Context, args json.RawMessage) (string, error) {
 			var params struct {
-				ChatID    string `json:"chat_id"`
-				Text      string `json:"text"`
-				ParseMode string `json:"parse_mode,omitempty"`
+				ChatID          string `json:"chat_id"`
+				Text            string `json:"text"`
+				ParseMode       string `json:"parse_mode,omitempty"`
+				MessageThreadID string `json:"message_thread_id,omitempty"`
 			}
 			if err := json.Unmarshal(args, &params); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
-			return sender.sendTelegram(ctx, params.ChatID, params.Text, params.ParseMode)
+			return sender.sendTelegram(ctx, params.ChatID, params.Text, params.ParseMode, params.MessageThreadID)
 		},
 	)
 
@@ -61,18 +63,20 @@ func RegisterTelegramTools(s *Server, sender *TelegramSender) {
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"chat_id": {Type: "string", Description: "Telegram chat ID"},
-					"status":  {Type: "string", Description: "Notification status: success, error, info, or warning"},
-					"message": {Type: "string", Description: "Notification message text"},
+					"chat_id":           {Type: "string", Description: "Telegram chat ID"},
+					"status":            {Type: "string", Description: "Notification status: success, error, info, or warning"},
+					"message":           {Type: "string", Description: "Notification message text"},
+					"message_thread_id": {Type: "string", Description: "Forum topic thread ID (optional)"},
 				},
 				Required: []string{"chat_id", "status", "message"},
 			},
 		},
 		func(ctx context.Context, args json.RawMessage) (string, error) {
 			var params struct {
-				ChatID  string `json:"chat_id"`
-				Status  string `json:"status"`
-				Message string `json:"message"`
+				ChatID          string `json:"chat_id"`
+				Status          string `json:"status"`
+				Message         string `json:"message"`
+				MessageThreadID string `json:"message_thread_id,omitempty"`
 			}
 			if err := json.Unmarshal(args, &params); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
@@ -84,14 +88,14 @@ func RegisterTelegramTools(s *Server, sender *TelegramSender) {
 			// Try MarkdownV2 first.
 			escaped := escapeMarkdownV2(params.Message)
 			formatted := fmt.Sprintf("%s *%s*\n%s", emoji, status, escaped)
-			result, err := sender.sendTelegram(ctx, params.ChatID, formatted, "MarkdownV2")
+			result, err := sender.sendTelegram(ctx, params.ChatID, formatted, "MarkdownV2", params.MessageThreadID)
 			if err == nil {
 				return result, nil
 			}
 
 			// Fall back to plain text if MarkdownV2 fails.
 			plain := fmt.Sprintf("%s %s\n%s", emoji, status, params.Message)
-			result, err = sender.sendTelegram(ctx, params.ChatID, plain, "")
+			result, err = sender.sendTelegram(ctx, params.ChatID, plain, "", params.MessageThreadID)
 			if err != nil {
 				return "", err
 			}
@@ -101,13 +105,16 @@ func RegisterTelegramTools(s *Server, sender *TelegramSender) {
 }
 
 // sendTelegram posts a message to the Telegram Bot API and checks the response.
-func (s *TelegramSender) sendTelegram(ctx context.Context, chatID, text, parseMode string) (string, error) {
-	body := map[string]string{
+func (s *TelegramSender) sendTelegram(ctx context.Context, chatID, text, parseMode, threadID string) (string, error) {
+	body := map[string]interface{}{
 		"chat_id": chatID,
 		"text":    text,
 	}
 	if parseMode != "" {
 		body["parse_mode"] = parseMode
+	}
+	if threadID != "" {
+		body["message_thread_id"] = threadID
 	}
 
 	jsonBody, err := json.Marshal(body)

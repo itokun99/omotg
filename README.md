@@ -8,9 +8,9 @@ OMOTG is a Go-based bidirectional bridge that connects **Telegram** to **OpenCod
 - **🔌 MCP SSE Server** — Exposes Telegram tools (`send_message`, `send_notification`) to any MCP client (including OpenCode itself)
 - **📦 Zero Dependencies** — Pure Go standard library, no external packages
 - **🔒 Secure** — Secret token verification, chat ID whitelist, self-signed TLS cert for webhook
-- **🧵 Session Management** — Thread-safe session store with auto-expiry and cleanup
-- **💬 Group & Forum Topics** — Supports Telegram supergroup forum topics; auto-creates a new topic per session
-- **🧹 Auto Cleanup** — Expired sessions cleaned every 5 minutes
+- **🧵 Session Management** — Thread-safe multi-session store with per-chat and per-topic routing; sessions persist until explicitly deleted
+- **💬 Group & Forum Topics** — Supports Telegram supergroup forum topics; `/topic new` creates a dedicated topic + OpenCode session
+- **🤖 Bot Persona** — Reads bot name & description from Telegram for personalized welcome messages
 - **📋 Systemd Integration** — Ships with systemd user service files for auto-start
 
 ## Prerequisites
@@ -174,18 +174,28 @@ Configuration is via environment variables in `~/.config/omotg/env`:
 | `/status` | Check server status via OpenCode |
 | `/deploy <env>` | Deploy application to environment |
 | `/logs [N]` | Show last N lines of server logs (default: 50) |
+| `/session` | Show current session info |
+| `/session new [text]` | Create a new session (optionally with first prompt) |
+| `/session list` | List all sessions |
+| `/session switch <id>` | Switch to a different session |
+| `/session delete <id>` | Delete a session |
+| `/topic new <nama>` | Create a new forum topic with bound session (group only) |
+| `/topic close` | Close the current forum topic (group only) |
+| `/topic delete` | Permanently delete the current forum topic (group only) |
 
-Any non-command message is forwarded to OpenCode as a free-form chat.
+Any non-command message is forwarded to OpenCode using the current session.
 
 ### Group & Forum Topics
 
-OMOTG supports **Telegram supergroup forum topics**. When sending a message to a group with forum topics enabled:
+OMOTG supports **Telegram supergroup forum topics**. Conversations are routed as follows:
 
-- **Message in a topic** — OMOTG replies in the same topic thread
-- **Message in General** — OMOTG auto-creates a new forum topic named `OMOTG-<session_id>` and replies there
-- **Private chat** — works as before, no topic behavior
+- **Message in a topic** — OMOTG replies in the same topic thread, using the session bound to that topic
+- **Message in General** — OMOTG replies in General using the group's default session
+- **Private chat** — works as before, with persistent session
 
-Each OpenCode session gets its own topic, keeping conversations organized in busy groups. Topic creation failure sends an error to the General thread.
+To create a dedicated workspace, use `/topic new <nama>` — this creates a new forum topic and binds a fresh OpenCode session to it. Use `/topic close` or `/topic delete` to clean up the topic and its session.
+
+Each OpenCode session maps to one topic, keeping conversations organized in busy groups.
 
 ### MCP Tools
 
@@ -221,12 +231,12 @@ Telegram App          Server (VPS)                    OpenCode CLI
     │                      │    │                         │
     │                      │    │ POST /session           │
     │                      │    │ POST /session/{id}/msg  │
-    │                      │    │ GET /global/event (SSE) │
+    │                      │    │ DELETE /session/{id}    │
     │                      │    └───────────────────────→ opencode serve
     │                      │                              │ (port 4096)
     │                      │                              │
     │  sendMessage         │                              │
-    │  ←────────────────────  omotg                       │
+    │  ←────────────────────  omotg (sync response)       │
     │                      │    │                         │
     │                      │    │ MCP SSE endpoint        │
     │                      │    │ http://127.0.0.1:9090   │

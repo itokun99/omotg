@@ -148,6 +148,7 @@ func registerWebhook(token, url, secret, certFile string) error {
 		var buf bytes.Buffer
 		w := multipart.NewWriter(&buf)
 		w.WriteField("url", url)
+		w.WriteField("allowed_updates", `["message","channel_post"]`)
 		if secret != "" {
 			w.WriteField("secret_token", secret)
 		}
@@ -168,7 +169,10 @@ func registerWebhook(token, url, secret, certFile string) error {
 		body = &buf
 		contentType = w.FormDataContentType()
 	} else {
-		payload := map[string]string{"url": url}
+		payload := map[string]interface{}{
+			"url":            url,
+			"allowed_updates": []string{"message", "channel_post"},
+		}
 		if secret != "" {
 			payload["secret_token"] = secret
 		}
