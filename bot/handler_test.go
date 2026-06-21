@@ -89,30 +89,42 @@ func TestEscapeTelegramHTML(t *testing.T) {
 }
 
 func TestBuildPrompt(t *testing.T) {
-	got := buildPrompt(12345, 0, "cek status server")
-	if !strings.HasPrefix(got, "[OMOTG]") {
-		t.Errorf("buildPrompt() should start with [OMOTG], got: %q", got)
-	}
-	if !strings.Contains(got, "chat_id: 12345") {
+	got := buildPrompt(12345, 0, "ses_abc", "cek status server")
+	if !strings.Contains(got, " chat_id: 12345") {
 		t.Errorf("buildPrompt() should contain chat_id, got: %q", got)
 	}
-	if !strings.Contains(got, "thread_id: 0") {
+	if !strings.Contains(got, " thread_id: 0") {
 		t.Errorf("buildPrompt() should contain thread_id, got: %q", got)
 	}
-	if !strings.HasSuffix(got, "cek status server") {
-		t.Errorf("buildPrompt() should end with original prompt, got: %q", got)
+	if !strings.Contains(got, " session_id: ses_abc") {
+		t.Errorf("buildPrompt() should contain session_id, got: %q", got)
+	}
+	if !strings.Contains(got, "Here is the chat context for this message:") {
+		t.Errorf("buildPrompt() should contain context header, got: %q", got)
+	}
+	if !strings.HasPrefix(got, "cek status server") {
+		t.Errorf("buildPrompt() should start with prompt text, got: %q", got)
+	}
+	if !strings.HasSuffix(got, " session_id: ses_abc") {
+		t.Errorf("buildPrompt() should end with session_id, got: %q", got)
 	}
 }
 
 func TestBuildPromptWithThreadID(t *testing.T) {
-	got := buildPrompt(67890, 42, "cek logs")
-	if !strings.Contains(got, "chat_id: 67890") {
+	got := buildPrompt(67890, 42, "ses_def", "cek logs")
+	if !strings.Contains(got, " chat_id: 67890") {
 		t.Errorf("buildPrompt() should contain chat_id, got: %q", got)
 	}
-	if !strings.Contains(got, "thread_id: 42") {
+	if !strings.Contains(got, " thread_id: 42") {
 		t.Errorf("buildPrompt() should contain thread_id, got: %q", got)
 	}
-	if !strings.HasSuffix(got, "cek logs") {
-		t.Errorf("buildPrompt() should end with original prompt, got: %q", got)
+	if !strings.Contains(got, " session_id: ses_def") {
+		t.Errorf("buildPrompt() should contain session_id, got: %q", got)
+	}
+	if !strings.HasPrefix(got, "cek logs") {
+		t.Errorf("buildPrompt() should start with prompt text, got: %q", got)
+	}
+	if !strings.HasSuffix(got, " session_id: ses_def") {
+		t.Errorf("buildPrompt() should end with session_id, got: %q", got)
 	}
 }

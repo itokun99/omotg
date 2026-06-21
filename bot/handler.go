@@ -20,6 +20,11 @@ const telegramMaxMessageLen = 4000
 // can detect the request came via Telegram (OMOTG) vs OpenCode TUI.
 const omotgMarker = "[OMOTG]"
 
+type msgResult struct {
+	text string
+	err  error
+}
+
 var htmlEscaper = strings.NewReplacer(
 	"&", "&amp;",
 	"<", "&lt;",
@@ -57,8 +62,9 @@ func escapeTelegramHTML(s string) string {
 	return safeTagRestorer.Replace(htmlEscaper.Replace(s))
 }
 
-func buildPrompt(chatID, threadID int64, prompt string) string {
-	return fmt.Sprintf("%s\nchat_id: %d\nthread_id: %d\n---\n%s", omotgMarker, chatID, threadID, prompt)
+func buildPrompt(chatID, threadID int64, sessionID, prompt string) string {
+	return fmt.Sprintf("%s\n\nHere is the chat context for this message:\n chat_id: %d\n thread_id: %d\n session_id: %s",
+		prompt, chatID, threadID, sessionID)
 }
 
 // BotConfig holds configuration for the Telegram bot handler.
@@ -198,46 +204,271 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Use the resolved threadID — may differ from original when a new forum topic was auto-created
 	threadID = resolvedThreadID
 
-	// Send acknowledgment
+	// Send acknowledgment only for new sessions or deploy commands
 	var ackText string
 	switch {
 	case isNew && threadID > 0:
 		ackText = fmt.Sprintf("⏳ Memproses... (topic: %d, session: `%s`)", threadID, sessionID)
 	case isNew:
-		ackText = fmt.Sprintf("⏳ Memproses... (session baru: `%s`)", sessionID)
-	case threadID > 0:
-		ackText = fmt.Sprintf("⏳ Lanjut session: `%s`", sessionID)
-	default:
-		ackText = fmt.Sprintf("⏳ Lanjut session: `%s`", sessionID)
-	}
-	if cmd.Type == CmdDeploy && isNew {
+		ackText = fmt.Sprintf("⏳ Session baru: `%s`", sessionID)
+	case cmd.Type == CmdDeploy:
 		ackText = fmt.Sprintf("🚀 Menjalankan: `%s`", cmd.RawText)
 	}
-	b.sendTelegram(chatID, threadID, ackText)
+	if ackText != "" {
+		b.sendTelegram(chatID, threadID, ackText)
+	}
 
-	// Send message to OpenCode (async — don't block webhook response)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), b.config.SessionTimeout)
-		defer cancel()
-
-		// Update last-used timestamp
-		b.sessions.Renew(sessionID)
-
-		responseText, err := b.ocClient.SendMessage(ctx, sessionID, buildPrompt(chatID, threadID, cmd.Prompt))
-		if err != nil {
-			slog.Error("webhook: send message to OpenCode", "error", err, "session_id", sessionID)
-			b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", err))
-			return
-		}
-
-		if responseText != "" {
-			b.sendTelegram(chatID, threadID, responseText)
-		}
-		b.sendTelegram(chatID, threadID, fmt.Sprintf("✅ Selesai! (session: `%s`)", sessionID))
+		b.processMessage(ctx, cancel, sessionID, chatID, threadID, cmd.Prompt)
 	}()
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+}
+
+// processMessage sends a prompt to an OpenCode session, processes SSE events
+// for real-time progress, tracks child sessions, and forwards output to Telegram.
+func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFunc, sessionID string, chatID, threadID int64, promptText string) {
+	defer cancel()
+
+	ctx, cancelTimeout := context.WithTimeout(parentCtx, b.config.SessionTimeout)
+	defer cancelTimeout()
+
+	b.sessions.Renew(sessionID)
+	prompt := buildPrompt(chatID, threadID, sessionID, promptText)
+
+	// Start Telegram typing indicator (auto-cancelled when ctx ends)
+	typingCtx, typingCancel := context.WithCancel(ctx)
+	defer typingCancel()
+	b.startTyping(typingCtx, chatID, threadID)
+
+	// Try SSE event stream first for real-time progress
+	eventCtx, eventCancel := context.WithCancel(ctx)
+	defer eventCancel()
+
+	eventCh, sseErr := b.ocClient.ConnectEventStream(eventCtx)
+	if sseErr != nil {
+		slog.Warn("webhook: SSE stream unavailable, falling back to sync", "error", sseErr)
+		b.sendSyncMessage(ctx, sessionID, chatID, threadID, prompt)
+		return
+	}
+
+	msgCh := make(chan msgResult, 1)
+	go func() {
+		t, e := b.ocClient.SendMessage(ctx, sessionID, prompt)
+		msgCh <- msgResult{t, e}
+	}()
+
+	// Track sessions we're monitoring
+	trackedSessions := map[string]bool{sessionID: true}
+	mainTextSent := false
+	var childTimeout <-chan time.Time
+
+	// Process events until main session completes
+	for {
+		select {
+		case event, ok := <-eventCh:
+			if !ok {
+				eventCh = nil
+				// Stream died; wait for POST response with timeout
+				select {
+				case res := <-msgCh:
+					b.handleMsgResult(res, sessionID, chatID, threadID, &mainTextSent)
+				case <-time.After(30 * time.Second):
+					slog.Warn("webhook: SSE died and POST timeout", "session_id", sessionID)
+				}
+				return
+			}
+			b.handleSSEEvent(event, trackedSessions, chatID, threadID, &mainTextSent)
+
+		case res := <-msgCh:
+			if res.err != nil {
+				slog.Error("webhook: send message", "error", res.err, "session_id", sessionID)
+				b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", res.err))
+				return
+			}
+			if !mainTextSent && res.text != "" {
+				b.sendTelegram(chatID, threadID, res.text)
+			}
+
+			// Check for child sessions
+			children, cerr := b.ocClient.GetSessionChildren(ctx, sessionID)
+			if cerr != nil {
+				slog.Warn("webhook: get children", "error", cerr, "session_id", sessionID)
+			} else if len(children) > 0 {
+				for _, c := range children {
+					trackedSessions[c] = true
+				}
+				b.sendTelegram(chatID, threadID, fmt.Sprintf("🔄 Menunggu %d sub-agent...", len(children)))
+				childTimeout = time.After(60 * time.Second)
+				// Continue processing to capture child events
+				continue
+			}
+
+			// No children — done
+			return
+
+		case <-childTimeout:
+			// Child sessions timeout — consider done
+			return
+
+		case <-ctx.Done():
+			// Timeout or context cancelled
+			return
+		}
+	}
+}
+
+// handleSSEEvent processes a single SSE event and forwards relevant updates to Telegram.
+// Only tool events are forwarded for real-time progress; text events are skipped
+// because the SSE stream echoes the user's own input and we rely on the POST
+// response for the assistant's actual text output.
+func (b *Bot) handleSSEEvent(event SSEEvent, trackedSessions map[string]bool, chatID, threadID int64, mainTextSent *bool) {
+	if event.Type != "message.part.updated" {
+		return
+	}
+	var props struct {
+		SessionID string          `json:"sessionID"`
+		Part      json.RawMessage `json:"part"`
+	}
+	if err := json.Unmarshal(event.Properties, &props); err != nil {
+		return
+	}
+	if !trackedSessions[props.SessionID] {
+		return
+	}
+	var part struct {
+		Type  string          `json:"type"`
+		Tool  string          `json:"tool,omitempty"`
+		Input json.RawMessage `json:"input,omitempty"`
+		State *PartState      `json:"state,omitempty"`
+	}
+	if err := json.Unmarshal(props.Part, &part); err != nil {
+		return
+	}
+	if part.Type == "tool" && part.State != nil && part.State.Status == "running" {
+		label := formatVerboseTool(part.Tool, part.Input)
+		b.sendTelegram(chatID, threadID, fmt.Sprintf("%s %s", EmojiForTool(part.Tool), label))
+	}
+}
+
+// formatVerboseTool extracts meaningful arguments from a tool's input JSON
+// for display in Telegram. Falls back to "tool..." if input is empty.
+func formatVerboseTool(tool string, input json.RawMessage) string {
+	if len(input) == 0 || string(input) == "null" || string(input) == "{}" {
+		return tool + "..."
+	}
+	var args struct {
+		FilePath string `json:"filePath"`
+		Path     string `json:"path"`
+		Pattern  string `json:"pattern"`
+		Command  string `json:"command"`
+		Query    string `json:"query"`
+		URL      string `json:"url"`
+		Text     string `json:"text"`
+		Prompt   string `json:"prompt"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return tool + "..."
+	}
+	s := ""
+	switch {
+	case args.Pattern != "":
+		s = args.Pattern
+	case args.FilePath != "":
+		s = args.FilePath
+	case args.Path != "":
+		s = args.Path
+	case args.Command != "":
+		s = args.Command
+	case args.Query != "":
+		s = args.Query
+	case args.URL != "":
+		s = args.URL
+	case args.Prompt != "":
+		s = args.Prompt
+	case args.Text != "":
+		s = args.Text
+	}
+	if s == "" {
+		return tool + "..."
+	}
+	// Trim very long arguments to fit Telegram message
+	runes := []rune(s)
+	if len(runes) > 80 {
+		s = string(runes[:77]) + "..."
+	}
+	return tool + ": " + s
+}
+
+// handleMsgResult processes the result from SendMessage after SSE stream dies.
+func (b *Bot) handleMsgResult(res msgResult, sessionID string, chatID, threadID int64, mainTextSent *bool) {
+	if res.err != nil {
+		slog.Error("webhook: send message", "error", res.err, "session_id", sessionID)
+		b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", res.err))
+		return
+	}
+	if !*mainTextSent && res.text != "" {
+		b.sendTelegram(chatID, threadID, res.text)
+	}
+}
+
+// sendSyncMessage is the fallback used when SSE stream cannot be established.
+func (b *Bot) sendSyncMessage(ctx context.Context, sessionID string, chatID, threadID int64, prompt string) {
+	responseText, err := b.ocClient.SendMessage(ctx, sessionID, prompt)
+	if err != nil {
+		slog.Error("webhook: send message to OpenCode", "error", err, "session_id", sessionID)
+		b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", err))
+		return
+	}
+	if responseText != "" {
+		b.sendTelegram(chatID, threadID, responseText)
+	}
+}
+
+// sendChatAction sends a Telegram chat action (e.g. "typing") to show bot activity.
+func (b *Bot) sendChatAction(chatID, threadID int64, action string) {
+	payload := map[string]interface{}{
+		"chat_id": chatID,
+		"action":  action,
+	}
+	if threadID > 0 {
+		payload["message_thread_id"] = threadID
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendChatAction", b.config.BotToken)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+}
+
+// startTyping periodically sends the typing indicator until ctx is cancelled.
+func (b *Bot) startTyping(ctx context.Context, chatID, threadID int64) {
+	go func() {
+		b.sendChatAction(chatID, threadID, "typing")
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				b.sendChatAction(chatID, threadID, "typing")
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // resolveSession returns an existing session ID for reuse, or creates a new one.
@@ -356,7 +587,7 @@ func (b *Bot) handleSessionCommand(chatID, threadID int64, cmd ParsedCommand) {
 			go func() {
 				ctx2, cancel2 := context.WithTimeout(context.Background(), b.config.SessionTimeout)
 				defer cancel2()
-				resp, err := b.ocClient.SendMessage(ctx2, sessionID, buildPrompt(chatID, threadID, cmd.Prompt))
+				resp, err := b.ocClient.SendMessage(ctx2, sessionID, buildPrompt(chatID, threadID, sessionID, cmd.Prompt))
 				if err != nil {
 					b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", err))
 					return
