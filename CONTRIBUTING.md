@@ -1,26 +1,26 @@
 # Contributing
 
-Saya terbuka untuk kontribusi, selama tujuannya bener-bener buat **membuat OMOTG lebih baik** — bukan cuma ngejar profile atau portofolio.
+Contributions are welcome as long as their genuine goal is to **make OMOTG better** — not to pad a profile or portfolio.
 
 ## Ground Rules
 
-- **No commercial use.** Project ini CC BY-NC 4.0. Kontribusi kamu juga otomatis under license yang sama. Kalau mau commercial use, hubungi saya langsung.
-- **No profile farming.** PR kecil yang nggak jelas tujuannya (ganti typo doang, rename variable tanpa alasan) bakal ditutup. Saya hargai waktu kamu, tolong hargai juga waktu saya.
-- **Quality over quantity.** Satu PR yang bener-bener solves a problem > 10 PR kosmetik.
+- **No commercial use.** This project is CC BY-NC 4.0. Your contributions fall under the same license. Contact me directly for commercial licensing.
+- **No profile farming.** Trivial PRs (typo fixes without context, variable renames without reasoning) will be closed. I value your time — please value mine.
+- **Quality over quantity.** One well-reasoned PR that solves a real problem > 10 cosmetic ones.
 
-## Pull Request
+## Pull Request Process
 
-1. Fork repo-nya (private, jadi invite aja kalau mau langsung — tanya dulu).
-2. Buat branch dari `main`.
-3. Pastiin `go build ./...` sama `go vet ./...` lulus.
-4. Kalo nambah fitur, usahain ada testnya.
-5. Explain **kenapa** PR ini perlu — apa problemnya, apa solusinya.
-6. Saya review kalo sempat. Bisa cepat, bisa lambat. Sabar ya.
+1. Fork the repo (it's private — ask me for collaborator access if you prefer working directly).
+2. Branch from `main`.
+3. Ensure `go build ./...` and `go vet ./...` pass.
+4. If adding a feature, include tests where practical.
+5. Explain **why** the PR is needed — what problem it solves and what approach it takes.
+6. I'll review when I can. Could be fast, could be slow. Please be patient.
 
-## Cara Mulai
+## Getting Started
 
-Cek [README.md](README.md) — semua ada di situ. Kalau ada ide tapi bingung caranya, open a issue aja dulu, kita diskusi.
+Read the [README.md](README.md) — everything is there. If you have an idea but aren't sure how to implement it, open an issue first and we'll discuss.
 
 ---
 
-Makasih udah mau bantu. Serius.
+Thanks for wanting to help. It means a lot.
