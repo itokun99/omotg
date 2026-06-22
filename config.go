@@ -31,8 +31,8 @@ func LoadConfig() (*Config, error) {
 		WebhookPort:    envOrDefault("OMOTG_WEBHOOK_PORT", "8443"),
 		MCPPort:        envOrDefault("OMOTG_MCP_PORT", "9090"),
 		SessionTimeout: 300,
-		TLSCertFile:    envOrDefault("OMOTG_TLS_CERT_FILE", defaultCert),
-		TLSKeyFile:     envOrDefault("OMOTG_TLS_KEY_FILE", defaultKey),
+		TLSCertFile:    envLookup("OMOTG_TLS_CERT_FILE", defaultCert),
+		TLSKeyFile:     envLookup("OMOTG_TLS_KEY_FILE", defaultKey),
 	}
 
 	var missing []string
@@ -77,6 +77,14 @@ func LoadConfig() (*Config, error) {
 
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// envLookup returns the env value if set (even if empty), otherwise the default.
+func envLookup(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return def

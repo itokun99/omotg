@@ -101,9 +101,16 @@ func main() {
 	errCh := make(chan error, 2)
 
 	go func() {
-		slog.Info("webhook server listening (TLS)", "addr", whServer.Addr)
-		if err := whServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("webhook: %w", err)
+		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+			slog.Info("webhook server listening (TLS)", "addr", whServer.Addr)
+			if err := whServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("webhook: %w", err)
+			}
+		} else {
+			slog.Info("webhook server listening (plain HTTP, behind reverse proxy)", "addr", whServer.Addr)
+			if err := whServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("webhook: %w", err)
+			}
 		}
 	}()
 
