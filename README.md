@@ -36,7 +36,16 @@ brew install omotg
 
 This installs the binary to `$(brew --prefix)/bin/omotg` and the env template to `$(brew --prefix)/etc/omotg/env.template`.
 
-### Option 2: Build from Source
+### Option 2: Go Install (global binary)
+
+```bash
+go install github.com/itokun99/omotg@latest
+```
+
+This installs the `omotg` binary to `$(go env GOPATH)/bin/omotg`. Make sure
+`$(go env GOPATH)/bin` is in your `PATH`.
+
+### Option 3: Build from Source
 
 ```bash
 git clone git@github.com:itokun99/omotg.git
