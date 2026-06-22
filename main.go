@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"omotg/bot"
-	"omotg/mcp"
+	"github.com/itokun99/omotg/bot"
+	"github.com/itokun99/omotg/mcp"
 )
 
 func main() {
