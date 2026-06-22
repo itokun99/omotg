@@ -252,6 +252,7 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 // for real-time progress, tracks child sessions, and forwards output to Telegram.
 func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFunc, sessionID string, chatID, threadID int64, promptText string) {
 	defer cancel()
+	slog.Info("processMessage: starting", "session_id", sessionID, "chat_id", chatID)
 
 	ctx, cancelTimeout := context.WithTimeout(parentCtx, b.config.SessionTimeout)
 	defer cancelTimeout()
@@ -459,20 +460,36 @@ func (b *Bot) sendChatAction(chatID, threadID int64, action string) {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
+		slog.Error("sendChatAction: marshal", "error", err)
 		return
 	}
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendChatAction", b.config.BotToken)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
+		slog.Error("sendChatAction: create request", "error", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
+		slog.Warn("sendChatAction: HTTP call", "error", err, "chat_id", chatID)
 		return
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
+
+	var actResp struct {
+		Ok          bool   `json:"ok"`
+		Description string `json:"description,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&actResp); err != nil {
+		return
+	}
+	if !actResp.Ok {
+		slog.Warn("sendChatAction: telegram error",
+			"description", actResp.Description,
+			"chat_id", chatID,
+		)
+	}
 }
 
 // startTyping periodically sends the typing indicator until ctx is cancelled.
