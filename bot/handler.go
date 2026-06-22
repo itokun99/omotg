@@ -133,11 +133,12 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	var update struct {
 		UpdateID int `json:"update_id"`
 		Message  *struct {
-			MessageID       int64        `json:"message_id"`
-			MessageThreadID int64        `json:"message_thread_id,omitempty"`
-			Chat            TelegramChat `json:"chat"`
-			Text            string       `json:"text,omitempty"`
-			IsTopicMessage  bool         `json:"is_topic_message,omitempty"`
+			MessageID       int64           `json:"message_id"`
+			MessageThreadID int64           `json:"message_thread_id,omitempty"`
+			Chat            TelegramChat    `json:"chat"`
+			Text            string          `json:"text,omitempty"`
+			IsTopicMessage  bool            `json:"is_topic_message,omitempty"`
+			ReplyToMessage  *ReplyToMessage `json:"reply_to_message,omitempty"`
 		} `json:"message,omitempty"`
 	}
 
@@ -178,7 +179,7 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	isForum := (chatType == "supergroup" || chatType == "group")
 	isPrivate := (chatType == "private")
 
-	if !isPrivate && cmd.Type == CmdFreeChat && !isBotMentioned(text, b.persona) {
+	if !isPrivate && cmd.Type == CmdFreeChat && !isBotMentioned(text, b.persona) && !b.isReplyToBot(update.Message.ReplyToMessage) {
 		slog.Debug("webhook: ignoring non-mentioned message in group", "chat_id", chatID)
 		w.WriteHeader(http.StatusOK)
 		return
@@ -766,6 +767,14 @@ func isBotMentioned(text string, persona *BotPersona) bool {
 	return strings.Contains(text, "@"+persona.Username)
 }
 
+// isReplyToBot checks if the message is a reply to one of the bot's own messages.
+func (b *Bot) isReplyToBot(replyTo *ReplyToMessage) bool {
+	if replyTo == nil || replyTo.From == nil || b.persona == nil {
+		return false
+	}
+	return replyTo.From.ID == b.persona.ID
+}
+
 // isChatAllowed checks if a chat ID is in the whitelist.
 // Empty whitelist means all chats are allowed.
 func (b *Bot) isChatAllowed(chatID int64) bool {
@@ -784,6 +793,12 @@ func (b *Bot) isChatAllowed(chatID int64) bool {
 type TelegramChat struct {
 	ID   int64  `json:"id"`
 	Type string `json:"type,omitempty"` // "private", "group", "supergroup"
+}
+
+type ReplyToMessage struct {
+	From *struct {
+		ID int64 `json:"id"`
+	} `json:"from"`
 }
 
 // sendTelegram sends text to a Telegram chat via the Bot API.
