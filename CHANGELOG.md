@@ -5,11 +5,26 @@ All notable changes to OMOTG are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.5.0] — 2026-06-23
 
 ### Added
 
-- ...
+- **Multi-bot multi-agent** — one binary runs N Telegram bots, each routing
+  to a specific OMO agent (Sisyphus, Prometheus, Atlas, Hephaestus)
+- `SendMessageWithAgent()` — `agent` field injection in OpenCode message API,
+  enabling per-bot agent routing via config
+- `BotAgentConfig` — structured config for auxiliary bot-agent pairs
+- N-bot startup loop — `main.go` iterates `cfg.Bots`, wires per-bot
+  `SessionMap`/`TopicClient`, registers multi-path webhook mux
+- `OMO_*_BOT_TOKEN` env vars — `OMO_PROMETHEUS_BOT_TOKEN`,
+  `OMO_ATLAS_BOT_TOKEN`, `OMO_HEPHAESTUS_BOT_TOKEN` (auxiliary bots)
+- Per-bot webhook paths — `/webhook` (primary), `/webhook/<key>` (auxiliaries)
+
+### Fixed
+
+- Event loop 30s hang on sub-agent SSE death — `ctx.Done()` added to inner
+  select; `msgCh` nilled after child session receive; `mainTextSent` flag
+  correctly set after main text send
 
 ## [v0.4.0] — 2026-06-22
 

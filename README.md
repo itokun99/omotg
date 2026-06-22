@@ -7,6 +7,7 @@ OMOTG is a Go-based bidirectional bridge that connects **Telegram** to **OpenCod
 - **🤖 Telegram Bot** — Send messages to OpenCode and get responses via Telegram
 - **🔌 MCP SSE Server** — Exposes Telegram tools (`send_message`, `send_notification`) to any MCP client (including OpenCode itself)
 - **📦 Zero Dependencies** — Pure Go standard library, no external packages
+- **🤖 Multi-Bot Multi-Agent** — Run N Telegram bots in one binary, each routing to a different OMO agent (Sisyphus, Prometheus, Atlas, Hephaestus)
 - **🔒 Secure** — Secret token verification, chat ID whitelist, TLS cert for webhook (or plain HTTP behind a reverse proxy)
 - **🧵 Session Management** — Thread-safe multi-session store with per-chat and per-topic routing; sessions persist until explicitly deleted
 - **💬 Group & Forum Topics** — Supports Telegram supergroup forum topics; `/topic new` creates a dedicated topic + OpenCode session
@@ -174,6 +175,32 @@ Configuration is via environment variables in `~/.config/omotg/env`:
 | `OMOTG_SESSION_TIMEOUT` | `300` | Session timeout in seconds |
 | `OMOTG_TLS_CERT_FILE` | `~/.config/omotg/webhook.crt` | TLS certificate path (empty = plain HTTP, for reverse proxy mode) |
 | `OMOTG_TLS_KEY_FILE` | `~/.config/omotg/webhook.key` | TLS key path (empty = plain HTTP, for reverse proxy mode) |
+| `OMO_PROMETHEUS_BOT_TOKEN` | (none) | Auxiliary bot token → routes to Prometheus agent (`/webhook/prometheus`) |
+| `OMO_ATLAS_BOT_TOKEN` | (none) | Auxiliary bot token → routes to Atlas agent (`/webhook/atlas`) |
+| `OMO_HEPHAESTUS_BOT_TOKEN` | (none) | Auxiliary bot token → routes to Hephaestus agent (`/webhook/hephaestus`) |
+
+## Multi-Bot Routing
+
+OMOTG can run multiple Telegram bots simultaneously, each bound to a different OMO agent:
+
+| Bot Key | Env Var | Routes To | Webhook Path |
+|---------|---------|-----------|--------------|
+| Primary | `TELEGRAM_BOT_TOKEN` | Sisyphus — ultraworker | `/webhook` |
+| Prometheus | `OMO_PROMETHEUS_BOT_TOKEN` | Prometheus — Plan Builder | `/webhook/prometheus` |
+| Atlas | `OMO_ATLAS_BOT_TOKEN` | Atlas — Plan Executor | `/webhook/atlas` |
+| Hephaestus | `OMO_HEPHAESTUS_BOT_TOKEN` | Hephaestus — Deep Agent | `/webhook/hephaestus` |
+
+- The primary bot (`TELEGRAM_BOT_TOKEN`) is **required** — it maps to Sisyphus for backward compatibility.
+- Auxiliary bots are **optional** — set only the `OMO_*_BOT_TOKEN` vars for the agents you want.
+- Each auxiliary bot gets its own webhook path (`/webhook/<key>`) with its own Telegram webhook registration.
+- Bot sessions are isolated — each bot has its own `SessionMap`.
+
+To add an auxiliary bot, set its token and register the webhook via `@BotFather`:
+```
+https://your.domain.com/webhook/prometheus
+```
+
+> **Note**: Hephaestus is configured but requires an upstream OpenCode server fix (server-side `UnknownError` as of 2026-06-22). Enable once resolved.
 
 ## Usage
 
