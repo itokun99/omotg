@@ -7,7 +7,7 @@ OMOTG is a Go-based bidirectional bridge that connects **Telegram** to **OpenCod
 - **🤖 Telegram Bot** — Send messages to OpenCode and get responses via Telegram
 - **🔌 MCP SSE Server** — Exposes Telegram tools (`send_message`, `send_notification`) to any MCP client (including OpenCode itself)
 - **📦 Zero Dependencies** — Pure Go standard library, no external packages
-- **🔒 Secure** — Secret token verification, chat ID whitelist, self-signed TLS cert for webhook
+- **🔒 Secure** — Secret token verification, chat ID whitelist, TLS cert for webhook (or plain HTTP behind a reverse proxy)
 - **🧵 Session Management** — Thread-safe multi-session store with per-chat and per-topic routing; sessions persist until explicitly deleted
 - **💬 Group & Forum Topics** — Supports Telegram supergroup forum topics; `/topic new` creates a dedicated topic + OpenCode session
 - **🤖 Bot Persona** — Reads bot name & description from Telegram for personalized welcome messages
@@ -20,7 +20,7 @@ OMOTG is a Go-based bidirectional bridge that connects **Telegram** to **OpenCod
 | Go | 1.26+ | For building from source |
 | OpenCode CLI | latest | For `opencode serve` backend |
 | systemd | any | User-mode services (logind) |
-| OpenSSL | any | For generating self-signed cert |
+| OpenSSL | any | Required only for standalone TLS (or use a reverse proxy) |
 | Linux | any | Tested on Ubuntu |
 | Homebrew | latest | Optional — for installing via `brew install omotg` |
 
@@ -50,9 +50,17 @@ Or install directly to your local bin:
 go build -o ~/.local/bin/omotg/omotg .
 ```
 
-### 2. Generate TLS Certificate
+### 2. TLS Certificate (optional)
 
-Telegram webhook requires HTTPS. Generate a self-signed certificate:
+Telegram webhook requires HTTPS. You have two options:
+
+#### Option A: Reverse proxy (recommended for production)
+
+Place OMOTG behind a reverse proxy (Traefik, Caddy, Nginx) with Let's Encrypt. Set
+both `OMOTG_TLS_CERT_FILE=` and `OMOTG_TLS_KEY_FILE=` to empty in your env file to
+start the webhook server in plain HTTP mode. The proxy handles HTTPS termination.
+
+#### Option B: Self-signed certificate (standalone)
 
 ```bash
 mkdir -p ~/.config/omotg
@@ -71,9 +79,13 @@ Replace `your-domain.com` with your actual domain pointing to your server.
 cp env.template ~/.config/omotg/env
 # Then edit with your values:
 #   TELEGRAM_BOT_TOKEN — from @BotFather
-#   TELEGRAM_WEBHOOK_URL — https://your-domain.com:8443/webhook
+#   TELEGRAM_WEBHOOK_URL — https://your-domain.com/webhook (or :8443/webhook for standalone)
 #   TELEGRAM_SECRET_TOKEN — any random string
 #   OPENCODE_SERVER_PASSWORD — any string (opencode serve on localhost ignores auth)
+#
+# For reverse proxy mode, also set:
+#   OMOTG_TLS_CERT_FILE=
+#   OMOTG_TLS_KEY_FILE=
 ```
 
 See [Configuration](#configuration) for all options.
@@ -147,7 +159,7 @@ Configuration is via environment variables in `~/.config/omotg/env`:
 | Variable | Description |
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Bot token from [@BotFather](https://t.me/botfather) |
-| `TELEGRAM_WEBHOOK_URL` | Public HTTPS URL for Telegram webhook (e.g. `https://your.domain:8443/webhook`) |
+| `TELEGRAM_WEBHOOK_URL` | Public HTTPS URL for Telegram webhook (e.g. `https://your.domain/webhook` or `https://your.domain:8443/webhook`) |
 | `TELEGRAM_SECRET_TOKEN` | Custom secret string to verify webhook requests |
 | `OPENCODE_SERVER_PASSWORD` | Password for OpenCode API (opencode serve on localhost ignores auth, but field is required) |
 
@@ -156,12 +168,12 @@ Configuration is via environment variables in `~/.config/omotg/env`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENCODE_SERVER_URL` | `http://127.0.0.1:4096` | OpenCode serve URL |
-| `OMOTG_WEBHOOK_PORT` | `8443` | Webhook TLS listen port |
+| `OMOTG_WEBHOOK_PORT` | `8443` | Webhook listen port |
 | `OMOTG_MCP_PORT` | `9090` | MCP SSE server port |
 | `OMOTG_ALLOWED_CHAT_IDS` | (empty = all allowed) | Comma-separated Telegram chat IDs |
 | `OMOTG_SESSION_TIMEOUT` | `300` | Session timeout in seconds |
-| `OMOTG_TLS_CERT_FILE` | `~/.config/omotg/webhook.crt` | TLS certificate path |
-| `OMOTG_TLS_KEY_FILE` | `~/.config/omotg/webhook.key` | TLS key path |
+| `OMOTG_TLS_CERT_FILE` | `~/.config/omotg/webhook.crt` | TLS certificate path (empty = plain HTTP, for reverse proxy mode) |
+| `OMOTG_TLS_KEY_FILE` | `~/.config/omotg/webhook.key` | TLS key path (empty = plain HTTP, for reverse proxy mode) |
 
 ## Usage
 
@@ -223,6 +235,8 @@ Add to your OpenCode config (`~/.config/opencode/opencode.json`):
 
 ## Architecture
 
+### Standalone TLS
+
 ```
 Telegram App          Server (VPS)                    OpenCode CLI
     │                      │                              │
@@ -244,11 +258,38 @@ Telegram App          Server (VPS)                    OpenCode CLI
     │                      │    │ ←── MCP tools ────── OpenCode
 ```
 
+### Behind Reverse Proxy (recommended)
+
+```
+Telegram App          Server (VPS)                             OpenCode CLI
+    │                      │                                        │
+    │  POST /webhook       │                                        │
+    │  ────────────────────→  Traefik (port 443, Let's Encrypt)     │
+    │                      │    │                                   │
+    │                      │    │ http://172.17.0.1:8443            │
+    │                      │    ↓                                   │
+    │                      │  omotg (plain HTTP)                    │
+    │                      │    │                                   │
+    │                      │    │ POST /session                     │
+    │                      │    │ POST /session/{id}/msg            │
+    │                      │    │ DELETE /session/{id}              │
+    │                      │    └───────────────────────────────→ opencode serve
+    │                      │                                        │ (port 4096)
+    │                      │                                        │
+    │  sendMessage         │                                        │
+    │  ←────────────────────  omotg (sync response)                 │
+    │                      │    │                                   │
+    │                      │    │ MCP SSE endpoint                  │
+    │                      │    │ http://127.0.0.1:9090             │
+    │                      │    │                                   │
+    │                      │    │ ←── MCP tools ────────────── OpenCode
+```
+
 ### Ports
 
 | Port | Service | Bind | Protocol |
 |------|---------|------|----------|
-| 8443 | OMOTG Webhook | `0.0.0.0` | HTTPS (TLS) |
+| 8443 | OMOTG Webhook | `0.0.0.0` | HTTPS (TLS) or plain HTTP behind proxy |
 | 9090 | OMOTG MCP SSE | `127.0.0.1` | HTTP/SSE |
 | 4096 | OpenCode Serve | `127.0.0.1` | HTTP/REST |
 
@@ -332,7 +373,8 @@ journalctl --user -u opencode-serve -f
 
 ## Security Notes
 
-- The webhook server uses a **self-signed certificate**. For production, set up a reverse proxy (Caddy/Nginx) with Let's Encrypt.
+- For **standalone mode**, the webhook server uses a self-signed certificate. For production, use a reverse proxy (Traefik/Caddy/Nginx) with Let's Encrypt and set `OMOTG_TLS_CERT_FILE=` and `OMOTG_TLS_KEY_FILE=` to empty to disable internal TLS.
+- In **reverse proxy mode**, OMOTG binds to `0.0.0.0` with plain HTTP. Ensure your proxy is the only publicly reachable endpoint and that the proxy port is firewalled.
 - The MCP server binds to `127.0.0.1` only — not accessible from the network.
 - Chat ID whitelist is **highly recommended**. Without it, anyone who finds your bot can interact with OpenCode.
 - The secret token verifies that webhook requests are genuinely from Telegram.
