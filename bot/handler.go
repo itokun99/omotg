@@ -296,15 +296,18 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 		case event, ok := <-eventCh:
 			if !ok {
 				eventCh = nil
-				// Stream died; wait for POST response with timeout
-				select {
-				case res := <-msgCh:
-					b.handleMsgResult(res, sessionID, chatID, threadID, &mainTextSent)
-				case <-time.After(30 * time.Second):
-					slog.Warn("webhook: SSE died and POST timeout", "session_id", sessionID)
-				}
+			// Stream died; wait for POST response with timeout
+			select {
+			case res := <-msgCh:
+				b.handleMsgResult(res, sessionID, chatID, threadID, &mainTextSent)
+			case <-ctx.Done():
+				// Session timed out while stream was down
 				return
+			case <-time.After(30 * time.Second):
+				slog.Warn("webhook: SSE died and POST timeout", "session_id", sessionID)
 			}
+			return
+		}
 			b.handleSSEEvent(event, trackedSessions, chatID, threadID, &mainTextSent)
 
 		case res := <-msgCh:
@@ -315,6 +318,7 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 			}
 			if !mainTextSent && res.text != "" {
 				b.sendTelegram(chatID, threadID, res.text)
+				mainTextSent = true
 			}
 
 			// Check for child sessions
@@ -327,7 +331,7 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 				}
 				b.sendTelegram(chatID, threadID, fmt.Sprintf("🔄 Menunggu %d sub-agent...", len(children)))
 				childTimeout = time.After(60 * time.Second)
-				// Continue processing to capture child events
+				msgCh = nil // no goroutine will send again; prevents 30s block on SSE death
 				continue
 			}
 
