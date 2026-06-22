@@ -62,9 +62,23 @@ func escapeTelegramHTML(s string) string {
 	return safeTagRestorer.Replace(htmlEscaper.Replace(s))
 }
 
-func buildPrompt(chatID, threadID int64, sessionID, prompt string) string {
-	return fmt.Sprintf("%s\n\nHere is the chat context for this message:\n chat_id: %d\n thread_id: %d\n session_id: %s",
-		prompt, chatID, threadID, sessionID)
+func buildPrompt(chatID, threadID int64, sessionID, prompt string, persona *BotPersona) string {
+	var b strings.Builder
+	b.WriteString(prompt)
+	b.WriteString("\n\nHere is the chat context for this message:\n")
+	fmt.Fprintf(&b, " chat_id: %d\n", chatID)
+	fmt.Fprintf(&b, " thread_id: %d\n", threadID)
+	fmt.Fprintf(&b, " session_id: %s", sessionID)
+	if persona != nil {
+		fmt.Fprintf(&b, "\n bot_name: %s", persona.FirstName)
+		if persona.Username != "" {
+			fmt.Fprintf(&b, "\n bot_username: @%s", persona.Username)
+		}
+		if persona.Description != "" {
+			fmt.Fprintf(&b, "\n bot_description: %s", persona.Description)
+		}
+	}
+	return b.String()
 }
 
 // BotConfig holds configuration for the Telegram bot handler.
@@ -164,6 +178,12 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	isForum := (chatType == "supergroup" || chatType == "group")
 	isPrivate := (chatType == "private")
 
+	if !isPrivate && cmd.Type == CmdFreeChat && !isBotMentioned(text, b.persona) {
+		slog.Debug("webhook: ignoring non-mentioned message in group", "chat_id", chatID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	// Handle system commands locally
 	switch cmd.Type {
 	case CmdStart:
@@ -236,7 +256,7 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 	defer cancelTimeout()
 
 	b.sessions.Renew(sessionID)
-	prompt := buildPrompt(chatID, threadID, sessionID, promptText)
+	prompt := buildPrompt(chatID, threadID, sessionID, promptText, b.persona)
 
 	// Start Telegram typing indicator (auto-cancelled when ctx ends)
 	typingCtx, typingCancel := context.WithCancel(ctx)
@@ -587,7 +607,7 @@ func (b *Bot) handleSessionCommand(chatID, threadID int64, cmd ParsedCommand) {
 			go func() {
 				ctx2, cancel2 := context.WithTimeout(context.Background(), b.config.SessionTimeout)
 				defer cancel2()
-				resp, err := b.ocClient.SendMessage(ctx2, sessionID, buildPrompt(chatID, threadID, sessionID, cmd.Prompt))
+				resp, err := b.ocClient.SendMessage(ctx2, sessionID, buildPrompt(chatID, threadID, sessionID, cmd.Prompt, b.persona))
 				if err != nil {
 					b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", err))
 					return
@@ -737,6 +757,13 @@ func joinLines(lines []string) string {
 		b.WriteString(l)
 	}
 	return b.String()
+}
+
+func isBotMentioned(text string, persona *BotPersona) bool {
+	if persona == nil || persona.Username == "" {
+		return false
+	}
+	return strings.Contains(text, "@"+persona.Username)
 }
 
 // isChatAllowed checks if a chat ID is in the whitelist.

@@ -134,6 +134,7 @@ func (tc *TopicClient) DeleteForumTopic(chatID, threadID int64) error {
 // BotPersona holds information about the bot for personalizing messages.
 type BotPersona struct {
 	FirstName   string
+	Username    string // @username (without @)
 	Description string
 }
 
@@ -150,6 +151,7 @@ func (tc *TopicClient) GetBotPersona() (*BotPersona, error) {
 		Ok     bool `json:"ok"`
 		Result *struct {
 			FirstName string `json:"first_name"`
+			Username  string `json:"username"`
 		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&meResult); err != nil {
@@ -162,7 +164,7 @@ func (tc *TopicClient) GetBotPersona() (*BotPersona, error) {
 	descURL := fmt.Sprintf("https://api.telegram.org/bot%s/getMyDescription", tc.botToken)
 	resp2, err := tc.httpClient.Get(descURL)
 	if err != nil {
-		return &BotPersona{FirstName: meResult.Result.FirstName}, nil
+		return &BotPersona{FirstName: meResult.Result.FirstName, Username: meResult.Result.Username}, nil
 	}
 	defer resp2.Body.Close()
 
@@ -173,11 +175,12 @@ func (tc *TopicClient) GetBotPersona() (*BotPersona, error) {
 		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp2.Body).Decode(&descResult); err != nil || !descResult.Ok || descResult.Result == nil {
-		return &BotPersona{FirstName: meResult.Result.FirstName}, nil
+		return &BotPersona{FirstName: meResult.Result.FirstName, Username: meResult.Result.Username}, nil
 	}
 
 	return &BotPersona{
 		FirstName:   meResult.Result.FirstName,
+		Username:    meResult.Result.Username,
 		Description: descResult.Result.Description,
 	}, nil
 }

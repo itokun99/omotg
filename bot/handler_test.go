@@ -89,7 +89,7 @@ func TestEscapeTelegramHTML(t *testing.T) {
 }
 
 func TestBuildPrompt(t *testing.T) {
-	got := buildPrompt(12345, 0, "ses_abc", "cek status server")
+	got := buildPrompt(12345, 0, "ses_abc", "cek status server", nil)
 	if !strings.Contains(got, " chat_id: 12345") {
 		t.Errorf("buildPrompt() should contain chat_id, got: %q", got)
 	}
@@ -111,7 +111,7 @@ func TestBuildPrompt(t *testing.T) {
 }
 
 func TestBuildPromptWithThreadID(t *testing.T) {
-	got := buildPrompt(67890, 42, "ses_def", "cek logs")
+	got := buildPrompt(67890, 42, "ses_def", "cek logs", nil)
 	if !strings.Contains(got, " chat_id: 67890") {
 		t.Errorf("buildPrompt() should contain chat_id, got: %q", got)
 	}
