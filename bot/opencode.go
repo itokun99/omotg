@@ -172,13 +172,22 @@ func extractTextParts(resp *sendMessageResponse) string {
 	return strings.Join(texts, "\n")
 }
 
-// SendMessage sends a prompt message to an existing session and returns
-// the extracted response text from the HTTP response body.
+// SendMessage sends a prompt message to an existing session without
+// specifying an agent (server default applies). Kept for backward compat.
 func (c *OCClient) SendMessage(ctx context.Context, sessionID, prompt string) (string, error) {
+	return c.SendMessageWithAgent(ctx, sessionID, prompt, "")
+}
+
+// SendMessageWithAgent sends a prompt with the given agent routing field.
+// If agent is empty, the field is omitted (server falls back to its default).
+func (c *OCClient) SendMessageWithAgent(ctx context.Context, sessionID, prompt, agent string) (string, error) {
 	body := map[string]interface{}{
 		"parts": []map[string]string{
 			{"type": "text", "text": prompt},
 		},
+	}
+	if agent != "" {
+		body["agent"] = agent
 	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {

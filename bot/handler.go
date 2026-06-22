@@ -87,6 +87,7 @@ type BotConfig struct {
 	AllowedChatIDs []int64
 	SessionTimeout time.Duration
 	BotToken       string
+	Agent          string // OpenCode agent display name ("" = server default)
 }
 
 // Bot handles incoming Telegram webhooks and forwards commands to OpenCode.
@@ -97,6 +98,7 @@ type Bot struct {
 	topicClient *TopicClient
 	httpClient  *http.Client
 	persona     *BotPersona
+	agent       string // OpenCode agent display name, may be "" for default
 }
 
 // NewBot creates a new Bot handler.
@@ -110,13 +112,14 @@ func NewBot(cfg *BotConfig, ocClient *OCClient, sessions *SessionMap, topicClien
 		sessions:    sessions,
 		topicClient: topicClient,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
+		agent:       cfg.Agent,
 	}
 	// Fetch bot persona at startup; non-fatal if it fails
 	if p, err := topicClient.GetBotPersona(); err == nil {
 		bot.persona = p
-		slog.Info("bot persona loaded", "name", p.FirstName, "has_description", p.Description != "")
+		slog.Info("bot persona loaded", "name", p.FirstName, "has_description", p.Description != "", "agent", bot.agent)
 	} else {
-		slog.Warn("failed to fetch bot persona", "error", err)
+		slog.Warn("failed to fetch bot persona", "error", err, "agent", bot.agent)
 	}
 	return bot
 }
@@ -278,7 +281,7 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 
 	msgCh := make(chan msgResult, 1)
 	go func() {
-		t, e := b.ocClient.SendMessage(ctx, sessionID, prompt)
+		t, e := b.ocClient.SendMessageWithAgent(ctx, sessionID, prompt, b.agent)
 		msgCh <- msgResult{t, e}
 	}()
 
@@ -438,7 +441,7 @@ func (b *Bot) handleMsgResult(res msgResult, sessionID string, chatID, threadID 
 
 // sendSyncMessage is the fallback used when SSE stream cannot be established.
 func (b *Bot) sendSyncMessage(ctx context.Context, sessionID string, chatID, threadID int64, prompt string) {
-	responseText, err := b.ocClient.SendMessage(ctx, sessionID, prompt)
+	responseText, err := b.ocClient.SendMessageWithAgent(ctx, sessionID, prompt, b.agent)
 	if err != nil {
 		slog.Error("webhook: send message to OpenCode", "error", err, "session_id", sessionID)
 		b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", err))
@@ -625,7 +628,7 @@ func (b *Bot) handleSessionCommand(chatID, threadID int64, cmd ParsedCommand) {
 			go func() {
 				ctx2, cancel2 := context.WithTimeout(context.Background(), b.config.SessionTimeout)
 				defer cancel2()
-				resp, err := b.ocClient.SendMessage(ctx2, sessionID, buildPrompt(chatID, threadID, sessionID, cmd.Prompt, b.persona))
+				resp, err := b.ocClient.SendMessageWithAgent(ctx2, sessionID, buildPrompt(chatID, threadID, sessionID, cmd.Prompt, b.persona), b.agent)
 				if err != nil {
 					b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", err))
 					return

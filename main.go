@@ -33,47 +33,82 @@ func main() {
 		"session_timeout", cfg.SessionTimeout,
 	)
 
-	// Create OpenCode client.
+	// Create the single shared OpenCode client — all bots speak to the same server.
 	ocClient := bot.NewOCClient(cfg.OpenCodeURL, cfg.OpenCodePassword)
 
-	// Create session map.
-	sessions := bot.NewSessionMap()
-
-	// Create TopicClient for forum topics.
-	topicClient := bot.NewTopicClient(cfg.TelegramBotToken)
-
-	// Create bot handler.
-	botCfg := &bot.BotConfig{
-		SecretToken:    cfg.SecretToken,
-		AllowedChatIDs: cfg.AllowedChatIDs,
-		SessionTimeout: time.Duration(cfg.SessionTimeout) * time.Second,
-		BotToken:       cfg.TelegramBotToken,
+	// Per-bot handlers and webhook registrations.
+	type botHandler struct {
+		key       string
+		path      string
+		handlerFn http.HandlerFunc
 	}
-	bh := bot.NewBot(botCfg, ocClient, sessions, topicClient)
+	var handlers []botHandler
+
+	for _, bc := range cfg.Bots {
+		sessions := bot.NewSessionMap()
+		topicClient := bot.NewTopicClient(bc.BotToken)
+		botCfg := &bot.BotConfig{
+			SecretToken:    cfg.SecretToken,
+			AllowedChatIDs: cfg.AllowedChatIDs,
+			SessionTimeout: time.Duration(cfg.SessionTimeout) * time.Second,
+			BotToken:       bc.BotToken,
+			Agent:          bc.Agent,
+		}
+		bh := bot.NewBot(botCfg, ocClient, sessions, topicClient)
+
+		// Primary keeps /webhook; auxiliaries get /webhook/<key>.
+		path := "/webhook"
+		if bc.Key != "primary" {
+			path = "/webhook/" + bc.Key
+		}
+		handlers = append(handlers, botHandler{
+			key:       bc.Key,
+			path:      path,
+			handlerFn: bh.HandleWebhook,
+		})
+		slog.Info("bot registered",
+			"key", bc.Key,
+			"webhook_path", path,
+			"agent", bc.Agent,
+		)
+	}
 
 	if len(cfg.AllowedChatIDs) == 0 {
 		slog.Warn("no AllowedChatIDs configured — ALL chats are allowed")
 	}
 
-	// Register Telegram webhook on startup.
-	if err := registerWebhook(cfg.TelegramBotToken, cfg.WebhookURL, cfg.SecretToken, cfg.TLSCertFile); err != nil {
-		slog.Warn("webhook registration failed (will retry)", "error", err)
-	} else {
-		slog.Info("webhook registered", "url", cfg.WebhookURL)
+	// Register Telegram webhooks on startup (one per bot).
+	for _, bc := range cfg.Bots {
+		if err := registerWebhook(bc.BotToken, bc.WebhookURL, cfg.SecretToken, cfg.TLSCertFile); err != nil {
+			slog.Warn("webhook registration failed",
+				"bot_key", bc.Key,
+				"error", err,
+			)
+		} else {
+			slog.Info("webhook registered",
+				"bot_key", bc.Key,
+				"url", bc.WebhookURL,
+			)
+		}
 	}
 
-	// Create MCP server and register Telegram tools.
+	// Create the shared MCP server — still uses the primary bot token.
+	primaryToken := cfg.TelegramBotToken
 	mcpBaseURL := "http://127.0.0.1:" + cfg.MCPPort
 	mcpServer := mcp.New(mcpBaseURL)
-	telegramSender := mcp.NewTelegramSender(cfg.TelegramBotToken)
+	telegramSender := mcp.NewTelegramSender(primaryToken)
 	mcp.RegisterTelegramTools(mcpServer, telegramSender)
 
-	// Start session cleanup goroutine.
-	go sessions.StartCleanup(context.Background(), 5*time.Minute)
+	// SessionMap.StartCleanup is a no-op today; keep one call for forward-compat.
+	go bot.NewSessionMap().StartCleanup(context.Background(), 5*time.Minute)
 
 	// --- Webhook HTTP server ---
 	webhookMux := http.NewServeMux()
-	webhookMux.HandleFunc("POST /webhook", bh.HandleWebhook)
+	for _, h := range handlers {
+		// Capture loop variable by-value to avoid the classic Go closure bug.
+		hh := h
+		webhookMux.HandleFunc("POST "+hh.path, hh.handlerFn)
+	}
 	webhookMux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
