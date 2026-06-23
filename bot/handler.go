@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -78,6 +79,16 @@ func buildPrompt(chatID, threadID int64, sessionID, prompt string, persona *BotP
 			fmt.Fprintf(&b, "\n bot_description: %s", persona.Description)
 		}
 	}
+	b.WriteString("\n")
+	b.WriteString("## OMOTG Behavioral Directives\n")
+	b.WriteString("This request arrived via Telegram. Follow these rules:\n")
+	b.WriteString("\n")
+	b.WriteString("1. Progress notifications: BEFORE each major tool call (bash, delegation, long operation), send a brief update via MCP send_telegram_message tool. Keep to 1 line.\n")
+	b.WriteString("2. Delegation: When delegating to a sub-agent, announce who and what task.\n")
+	b.WriteString("3. Conciseness: Do NOT spam. Batch related ops under one notification.\n")
+	b.WriteString("4. Errors: If a tool fails, report it briefly.\n")
+	b.WriteString("5. Completion: End with a clear summary of what was done.\n")
+	b.WriteString("6. If MCP tools unavailable: skip notifications, just deliver final result.\n")
 	return b.String()
 }
 
@@ -99,6 +110,10 @@ type Bot struct {
 	httpClient  *http.Client
 	persona     *BotPersona
 	agent       string // OpenCode agent display name, may be "" for default
+
+	rateLimitMu  sync.Mutex
+	lastSendTime time.Time // guarded by rateLimitMu
+	lastSendChat int64     // guarded by rateLimitMu — per-chat rate tracking
 }
 
 // NewBot creates a new Bot handler.
@@ -255,6 +270,11 @@ func (b *Bot) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 // for real-time progress, tracks child sessions, and forwards output to Telegram.
 func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFunc, sessionID string, chatID, threadID int64, promptText string) {
 	defer cancel()
+
+	completionReason := "unknown"
+	defer func() {
+		slog.Info("processMessage: completed", "session_id", sessionID, "reason", completionReason)
+	}()
 	slog.Info("processMessage: starting", "session_id", sessionID, "chat_id", chatID)
 
 	ctx, cancelTimeout := context.WithTimeout(parentCtx, b.config.SessionTimeout)
@@ -276,6 +296,7 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 	if sseErr != nil {
 		slog.Warn("webhook: SSE stream unavailable, falling back to sync", "error", sseErr)
 		b.sendSyncMessage(ctx, sessionID, chatID, threadID, prompt)
+		completionReason = "sse_unavailable"
 		return
 	}
 
@@ -288,7 +309,8 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 	// Track sessions we're monitoring
 	trackedSessions := map[string]bool{sessionID: true}
 	mainTextSent := false
-	var childTimeout <-chan time.Time
+	var childTimer *time.Timer
+	var childTexts *strings.Builder
 
 	// Process events until main session completes
 	for {
@@ -296,24 +318,50 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 		case event, ok := <-eventCh:
 			if !ok {
 				eventCh = nil
-			// Stream died; wait for POST response with timeout
-			select {
-			case res := <-msgCh:
-				b.handleMsgResult(res, sessionID, chatID, threadID, &mainTextSent)
-			case <-ctx.Done():
-				// Session timed out while stream was down
+				if msgCh != nil {
+					select {
+					case res := <-msgCh:
+						b.handleMsgResult(res, sessionID, chatID, threadID, &mainTextSent)
+					case <-ctx.Done():
+						completionReason = "session_timeout"
+						return
+					case <-time.After(30 * time.Second):
+						slog.Warn("webhook: SSE died and POST timeout, retrying", "session_id", sessionID)
+						b.sendTelegram(chatID, threadID, "⏳ Proses masih berjalan, mohon tunggu...")
+						select {
+						case res := <-msgCh:
+							b.handleMsgResult(res, sessionID, chatID, threadID, &mainTextSent)
+						case <-ctx.Done():
+							completionReason = "session_timeout"
+							return
+						}
+					}
+				}
+				if childTexts != nil && childTexts.Len() > 0 {
+					b.sendTelegram(chatID, threadID, childTexts.String())
+				}
+				if mainTextSent {
+					b.sendTelegram(chatID, threadID, "✅ Selesai!")
+				}
+				completionReason = "completed"
 				return
-			case <-time.After(30 * time.Second):
-				slog.Warn("webhook: SSE died and POST timeout", "session_id", sessionID)
 			}
-			return
-		}
-			b.handleSSEEvent(event, trackedSessions, chatID, threadID, &mainTextSent)
+			b.handleSSEEvent(event, trackedSessions, chatID, threadID, &mainTextSent, childTexts)
+			if childTimer != nil {
+				if !childTimer.Stop() {
+					select {
+					case <-childTimer.C:
+					default:
+					}
+				}
+				childTimer.Reset(60 * time.Second)
+			}
 
 		case res := <-msgCh:
 			if res.err != nil {
 				slog.Error("webhook: send message", "error", res.err, "session_id", sessionID)
 				b.sendTelegram(chatID, threadID, fmt.Sprintf("❌ Gagal: %s", res.err))
+				completionReason = "send_message_error"
 				return
 			}
 			if !mainTextSent && res.text != "" {
@@ -330,55 +378,93 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 					trackedSessions[c] = true
 				}
 				b.sendTelegram(chatID, threadID, fmt.Sprintf("🔄 Menunggu %d sub-agent...", len(children)))
-				childTimeout = time.After(60 * time.Second)
-				msgCh = nil // no goroutine will send again; prevents 30s block on SSE death
+				childTimer = time.NewTimer(60 * time.Second)
+				childTexts = new(strings.Builder)
+				msgCh = nil // no goroutine will send again
 				continue
 			}
 
 			// No children — done
+			if mainTextSent {
+				b.sendTelegram(chatID, threadID, "✅ Selesai! Ada yang bisa dibantu lagi?")
+			}
+			completionReason = "completed"
 			return
 
-		case <-childTimeout:
-			// Child sessions timeout — consider done
+		case <-childTimer.C:
+			if childTexts != nil && childTexts.Len() > 0 {
+				b.sendTelegram(chatID, threadID, childTexts.String())
+			}
+			b.sendTelegram(chatID, threadID, "⏱️ Waktu tunggu sub-agent habis. Hasil mungkin tidak lengkap.")
+			completionReason = "child_timeout"
 			return
 
 		case <-ctx.Done():
-			// Timeout or context cancelled
+			b.sendTelegram(chatID, threadID, "⏱️ Session timeout. Silakan kirim ulang pesan.")
+			if childTexts != nil && childTexts.Len() > 0 {
+				b.sendTelegram(chatID, threadID, childTexts.String())
+			}
+			completionReason = "session_timeout"
 			return
 		}
 	}
 }
 
 // handleSSEEvent processes a single SSE event and forwards relevant updates to Telegram.
-// Only tool events are forwarded for real-time progress; text events are skipped
-// because the SSE stream echoes the user's own input and we rely on the POST
-// response for the assistant's actual text output.
-func (b *Bot) handleSSEEvent(event SSEEvent, trackedSessions map[string]bool, chatID, threadID int64, mainTextSent *bool) {
-	if event.Type != "message.part.updated" {
-		return
-	}
-	var props struct {
-		SessionID string          `json:"sessionID"`
-		Part      json.RawMessage `json:"part"`
-	}
-	if err := json.Unmarshal(event.Properties, &props); err != nil {
-		return
-	}
-	if !trackedSessions[props.SessionID] {
-		return
-	}
-	var part struct {
-		Type  string          `json:"type"`
-		Tool  string          `json:"tool,omitempty"`
-		Input json.RawMessage `json:"input,omitempty"`
-		State *PartState      `json:"state,omitempty"`
-	}
-	if err := json.Unmarshal(props.Part, &part); err != nil {
-		return
-	}
-	if part.Type == "tool" && part.State != nil && part.State.Status == "running" {
-		label := formatVerboseTool(part.Tool, part.Input)
-		b.sendTelegram(chatID, threadID, fmt.Sprintf("%s %s", EmojiForTool(part.Tool), label))
+// Tool events are forwarded for real-time progress. Text events from child sessions
+// are collected for final delivery (sent when SSE stream ends or timeout fires).
+func (b *Bot) handleSSEEvent(event SSEEvent, trackedSessions map[string]bool, chatID, threadID int64, mainTextSent *bool, childTexts *strings.Builder) {
+	switch event.Type {
+	case "message.part.delta":
+		if childTexts == nil {
+			return
+		}
+		var delta struct {
+			SessionID string `json:"sessionID"`
+			Field     string `json:"field"`
+			Delta     string `json:"delta"`
+		}
+		if err := json.Unmarshal(event.Properties, &delta); err != nil {
+			return
+		}
+		if !trackedSessions[delta.SessionID] {
+			return
+		}
+		if delta.Field == "text" && delta.Delta != "" {
+			childTexts.WriteString(delta.Delta)
+		}
+
+	case "message.part.updated":
+		var props PartUpdateProps
+		if err := json.Unmarshal(event.Properties, &props); err != nil {
+			return
+		}
+		if !trackedSessions[props.SessionID] {
+			return
+		}
+		var part PartData
+		if err := json.Unmarshal(props.Part, &part); err != nil {
+			return
+		}
+		if part.Type == "text" && part.Text != "" {
+			if childTexts != nil {
+				if childTexts.Len() > 0 {
+					childTexts.WriteString("\n\n")
+				}
+				childTexts.WriteString(part.Text)
+			}
+			return
+		}
+		if part.Type == "tool" && part.State != nil && part.State.Status == "running" {
+			// Only forward important tool notifications (delegation/task) to reduce
+			// Telegram rate limiting. Skip verbose internal tools (bash, read, etc.)
+			// since the agent will send MCP notifications instead.
+			toolName := part.Tool
+			if toolName == "task" || toolName == "subagent" || strings.Contains(toolName, "delegat") {
+				label := formatVerboseTool(toolName, part.Input)
+				b.sendTelegram(chatID, threadID, fmt.Sprintf("%s %s", EmojiForTool(toolName), label))
+			}
+		}
 	}
 }
 
@@ -440,6 +526,7 @@ func (b *Bot) handleMsgResult(res msgResult, sessionID string, chatID, threadID 
 	}
 	if !*mainTextSent && res.text != "" {
 		b.sendTelegram(chatID, threadID, res.text)
+		*mainTextSent = true
 	}
 }
 
@@ -839,6 +926,18 @@ func (b *Bot) sendTelegram(chatID int64, threadID int64, text string) {
 }
 
 func (b *Bot) sendTelegramChunk(chatID int64, threadID int64, text string) {
+	// Rate limit: enforce minimum 500ms gap between sends to avoid
+	// Telegram "Too Many Requests" errors from burst tool notifications.
+	b.rateLimitMu.Lock()
+	elapsed := time.Since(b.lastSendTime)
+	if elapsed < 500*time.Millisecond {
+		b.rateLimitMu.Unlock()
+		time.Sleep(500*time.Millisecond - elapsed)
+	} else {
+		b.lastSendTime = time.Now()
+		b.rateLimitMu.Unlock()
+	}
+
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
 		"text":       escapeTelegramHTML(text),

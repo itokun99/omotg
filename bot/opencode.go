@@ -27,10 +27,11 @@ type PartUpdateProps struct {
 }
 
 type PartData struct {
-	Type  string     `json:"type"`
-	Text  string     `json:"text,omitempty"`
-	Tool  string     `json:"tool,omitempty"`
-	State *PartState `json:"state,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	Tool  string          `json:"tool,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+	State *PartState      `json:"state,omitempty"`
 }
 
 type PartState struct {
