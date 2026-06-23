@@ -5,6 +5,21 @@ All notable changes to OMOTG are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.1] — 2026-06-23
+
+### Fixed
+
+- **Module path** — corrected from `omotg` to `github.com/itokun99/omotg`,
+  enabling `go install github.com/itokun99/omotg@latest` for global install
+- **Hephaestus agent mapping** — restored `"hephaestus": "Hephaestus - Deep Agent"`
+  after temporary workaround (`"general"`), ensuring Ymir bot routes to the
+  correct OMO agent (gpt-5.5) instead of general-purpose model
+
+### Documentation
+
+- README: add `go install` option alongside Homebrew
+- Clean up stale handoff/planning docs
+
 ## [v0.5.0] — 2026-06-23
 
 ### Added
