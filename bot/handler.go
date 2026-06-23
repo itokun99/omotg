@@ -310,6 +310,7 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 	trackedSessions := map[string]bool{sessionID: true}
 	mainTextSent := false
 	var childTimer *time.Timer
+	var childTimeout <-chan time.Time
 	var childTexts *strings.Builder
 
 	// Process events until main session completes
@@ -350,11 +351,12 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 			if childTimer != nil {
 				if !childTimer.Stop() {
 					select {
-					case <-childTimer.C:
+		case <-childTimeout:
 					default:
 					}
 				}
 				childTimer.Reset(60 * time.Second)
+				childTimeout = childTimer.C
 			}
 
 		case res := <-msgCh:
@@ -379,6 +381,7 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 				}
 				b.sendTelegram(chatID, threadID, fmt.Sprintf("🔄 Menunggu %d sub-agent...", len(children)))
 				childTimer = time.NewTimer(60 * time.Second)
+				childTimeout = childTimer.C
 				childTexts = new(strings.Builder)
 				msgCh = nil // no goroutine will send again
 				continue
