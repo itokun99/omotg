@@ -44,8 +44,10 @@ func main() {
 	}
 	var handlers []botHandler
 
+	home, _ := os.UserHomeDir()
 	for _, bc := range cfg.Bots {
-		sessions := bot.NewSessionMap()
+		persistPath := filepath.Join(home, ".config/omotg", fmt.Sprintf("sessions_%s.json", bc.Key))
+		sessions := bot.NewSessionMap(persistPath)
 		topicClient := bot.NewTopicClient(bc.BotToken)
 		botCfg := &bot.BotConfig{
 			SecretToken:    cfg.SecretToken,
@@ -99,8 +101,6 @@ func main() {
 	telegramSender := mcp.NewTelegramSender(primaryToken)
 	mcp.RegisterTelegramTools(mcpServer, telegramSender)
 
-	// SessionMap.StartCleanup is a no-op today; keep one call for forward-compat.
-	go bot.NewSessionMap().StartCleanup(context.Background(), 5*time.Minute)
 
 	// --- Webhook HTTP server ---
 	webhookMux := http.NewServeMux()

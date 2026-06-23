@@ -28,7 +28,7 @@ func TestBotPassesAgentToMessageRequest(t *testing.T) {
 	defer srv.Close()
 
 	oc := NewOCClient(srv.URL, "p")
-	sessions := NewSessionMap()
+	sessions := NewSessionMap("")
 	tc := NewTopicClient("dummy-token")
 
 	cfg := &BotConfig{
