@@ -5,6 +5,35 @@ All notable changes to OMOTG are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.6.0] — 2026-06-24
+
+### Added
+
+- **Session persistence across restarts** — `SessionMap` now persists
+  `chatCurrent` and `topicBind` mappings to `~/.config/omotg/sessions_<bot>.json`.
+  Chat and topic session bindings survive server restarts, so conversations
+  continue with the same OpenCode session (and its full history) instead of
+  creating a new blank session.
+- **Dynamic child timeout** — child agent timeout timer resets on every SSE
+  event, so long-running sub-agents are only interrupted when truly idle (60s),
+  not when they are actively producing output.
+- **Completion reason logging** — every exit path from `processMessage` logs
+  a structured `reason` field (`completed`, `session_timeout`, `child_timeout`,
+  `send_message_error`, `sse_unavailable`) for observability.
+
+### Fixed
+
+- **Agent completion reports missing** — 5 root causes fixed where agent output
+  never reached Telegram: SSE stream death + slow POST response now retries and
+  notifies user; successful responses append completion marker; child and session
+  timeouts send explicit Telegram messages instead of silently returning;
+  `handleMsgResult` now correctly sets `*mainTextSent`.
+- **MCP endpoint URL** — `opencode.json` URL corrected from `/mcp` (404) to
+  `/mcp/sse` (200), enabling agents to call `send_telegram_message` and
+  `send_telegram_notification` tools.
+- **Rate limiting** — `sendTelegram` enforces 500ms minimum gap between sends
+  to avoid Telegram "Too Many Requests" errors from burst tool notifications.
+
 ## [v0.5.1] — 2026-06-23
 
 ### Fixed

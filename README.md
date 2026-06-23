@@ -9,7 +9,7 @@ OMOTG is a Go-based bidirectional bridge that connects **Telegram** to **OpenCod
 - **📦 Zero Dependencies** — Pure Go standard library, no external packages
 - **🤖 Multi-Bot Multi-Agent** — Run N Telegram bots in one binary, each routing to a different OMO agent (Sisyphus, Prometheus, Atlas, Hephaestus)
 - **🔒 Secure** — Secret token verification, chat ID whitelist, TLS cert for webhook (or plain HTTP behind a reverse proxy)
-- **🧵 Session Management** — Thread-safe multi-session store with per-chat and per-topic routing; sessions persist until explicitly deleted
+- **🧵 Session Management** — Thread-safe multi-session store with per-chat and per-topic routing; sessions persist until explicitly deleted. Session bindings survive server restarts via JSON persistence.
 - **💬 Group & Forum Topics** — Supports Telegram supergroup forum topics; `/topic new` creates a dedicated topic + OpenCode session
 - **🤖 Bot Persona** — Reads bot name & description from Telegram for personalized welcome messages
 - **📋 Systemd Integration** — Ships with systemd user service files for auto-start
