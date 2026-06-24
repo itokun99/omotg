@@ -5,7 +5,34 @@ All notable changes to OMOTG are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.6.0] — 2026-06-24
+## [v0.7.0] — 2026-06-24
+
+### Fixed
+
+- **Verbose tool descriptions** — OpenCode SSE puts tool input inside `state.input`,
+  not at the top-level `input` field. `formatVerboseTool` now reads from
+  `PartState.Input` as fallback, enabling proper description extraction for all
+  tool events including `task`, `subagent`, and `delegat`.
+- **Shared input cache** — Added `@last_with_input` fallback cache so handler
+  can retrieve tool descriptions even when the current event has empty input.
+- **Enhanced formatVerboseTool** — Now parses `description`, `category`, `todos`,
+  `selector`, `element`, `name`, `content` fields for richer descriptions.
+
+### Changed
+
+- **Child session tracking** — Added `hadChildren` flag to track whether any
+  child sessions were spawned, improving completion message logic.
+- **Persona aliasing directive** — Added directive #7 instructing agent to alias
+  as the Telegram bot persona name.
+- **MCP JSON-RPC ID handling** — Changed `json.Number` to `interface{}` for
+  better compatibility with various JSON-RPC clients.
+
+### Internal
+
+- **Debug logging** — Added comprehensive `slog.Info` debug logging for SSE
+  events and `formatVerboseTool` to ease future debugging.
+- **Response body handling** — Fixed `SendMessageWithAgent` to read response
+  body once and reuse, avoiding double-read issues.
 
 ### Added
 

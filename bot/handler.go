@@ -89,6 +89,9 @@ func buildPrompt(chatID, threadID int64, sessionID, prompt string, persona *BotP
 	b.WriteString("4. Errors: If a tool fails, report it briefly.\n")
 	b.WriteString("5. Completion: End with a clear summary of what was done.\n")
 	b.WriteString("6. If MCP tools unavailable: skip notifications, just deliver final result.\n")
+	if persona != nil {
+		fmt.Fprintf(&b, "7. Persona aliasing: You are the Telegram bot \"%s\". When the user asks who you are, introduce yourself as \"%s\". Do not mention your internal agent name.\n", persona.FirstName, persona.FirstName)
+	}
 	return b.String()
 }
 
@@ -308,7 +311,9 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 
 	// Track sessions we're monitoring
 	trackedSessions := map[string]bool{sessionID: true}
+	toolInputCache := make(map[string]json.RawMessage)
 	mainTextSent := false
+	hadChildren := false
 	var childTimer *time.Timer
 	var childTimeout <-chan time.Time
 	var childTexts *strings.Builder
@@ -341,17 +346,17 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 				if childTexts != nil && childTexts.Len() > 0 {
 					b.sendTelegram(chatID, threadID, childTexts.String())
 				}
-				if mainTextSent {
+				if hadChildren && mainTextSent {
 					b.sendTelegram(chatID, threadID, "✅ Selesai!")
 				}
 				completionReason = "completed"
 				return
 			}
-			b.handleSSEEvent(event, trackedSessions, chatID, threadID, &mainTextSent, childTexts)
+			b.handleSSEEvent(event, trackedSessions, toolInputCache, chatID, threadID, &mainTextSent, childTexts)
 			if childTimer != nil {
 				if !childTimer.Stop() {
 					select {
-		case <-childTimeout:
+					case <-childTimeout:
 					default:
 					}
 				}
@@ -376,6 +381,7 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 			if cerr != nil {
 				slog.Warn("webhook: get children", "error", cerr, "session_id", sessionID)
 			} else if len(children) > 0 {
+				hadChildren = true
 				for _, c := range children {
 					trackedSessions[c] = true
 				}
@@ -388,13 +394,13 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 			}
 
 			// No children — done
-			if mainTextSent {
+			if hadChildren && mainTextSent {
 				b.sendTelegram(chatID, threadID, "✅ Selesai! Ada yang bisa dibantu lagi?")
 			}
 			completionReason = "completed"
 			return
 
-		case <-childTimer.C:
+		case <-childTimeout:
 			if childTexts != nil && childTexts.Len() > 0 {
 				b.sendTelegram(chatID, threadID, childTexts.String())
 			}
@@ -416,7 +422,9 @@ func (b *Bot) processMessage(parentCtx context.Context, cancel context.CancelFun
 // handleSSEEvent processes a single SSE event and forwards relevant updates to Telegram.
 // Tool events are forwarded for real-time progress. Text events from child sessions
 // are collected for final delivery (sent when SSE stream ends or timeout fires).
-func (b *Bot) handleSSEEvent(event SSEEvent, trackedSessions map[string]bool, chatID, threadID int64, mainTextSent *bool, childTexts *strings.Builder) {
+// toolInputCache persists tool inputs across events — OpenCode sends input only on the
+// initial part creation (status="pending"), not on subsequent "running" updates.
+func (b *Bot) handleSSEEvent(event SSEEvent, trackedSessions map[string]bool, toolInputCache map[string]json.RawMessage, chatID, threadID int64, mainTextSent *bool, childTexts *strings.Builder) {
 	switch event.Type {
 	case "message.part.delta":
 		if childTexts == nil {
@@ -458,14 +466,44 @@ func (b *Bot) handleSSEEvent(event SSEEvent, trackedSessions map[string]bool, ch
 			}
 			return
 		}
-		if part.Type == "tool" && part.State != nil && part.State.Status == "running" {
-			// Only forward important tool notifications (delegation/task) to reduce
-			// Telegram rate limiting. Skip verbose internal tools (bash, read, etc.)
-			// since the agent will send MCP notifications instead.
-			toolName := part.Tool
-			if toolName == "task" || toolName == "subagent" || strings.Contains(toolName, "delegat") {
-				label := formatVerboseTool(toolName, part.Input)
-				b.sendTelegram(chatID, threadID, fmt.Sprintf("%s %s", EmojiForTool(toolName), label))
+		if part.Type == "tool" {
+			// DEBUG: log ALL tool events with raw part data to understand OpenCode's SSE structure
+			statusStr := "<nil>"
+			if part.State != nil {
+				statusStr = part.State.Status
+			}
+			slog.Info("handleSSEEvent: tool event",
+				"tool", part.Tool,
+				"status", statusStr,
+				"id", props.SessionID,
+				"input_len", len(part.Input),
+				"input_raw", string(part.Input),
+				"part_json", string(props.Part),
+			)
+			// OpenCode SSE puts tool input inside state.input, NOT at the top-level
+			// "input" field. So part.Input is always empty. We read from state.Input instead.
+			toolInput := part.Input
+			if len(toolInput) == 0 && part.State != nil && len(part.State.Input) > 0 {
+				toolInput = part.State.Input
+			}
+			if len(toolInput) > 0 {
+				toolInputCache[part.Tool] = toolInput
+				toolInputCache["@last_with_input"] = toolInput
+			}
+			if part.State != nil && part.State.Status == "running" {
+				toolName := part.Tool
+				if toolName == "task" || toolName == "subagent" || strings.Contains(toolName, "delegat") {
+					input := toolInput
+					if len(input) == 0 {
+						if cached, ok := toolInputCache[toolName]; ok {
+							input = cached
+						} else if last, ok := toolInputCache["@last_with_input"]; ok {
+							input = last
+						}
+					}
+					label := formatVerboseTool(toolName, input)
+					b.sendTelegram(chatID, threadID, fmt.Sprintf("%s %s", EmojiForTool(toolName), label))
+				}
 			}
 		}
 	}
@@ -474,40 +512,68 @@ func (b *Bot) handleSSEEvent(event SSEEvent, trackedSessions map[string]bool, ch
 // formatVerboseTool extracts meaningful arguments from a tool's input JSON
 // for display in Telegram. Falls back to "tool..." if input is empty.
 func formatVerboseTool(tool string, input json.RawMessage) string {
+	// DEBUG: always log so we can see what the raw input looks like
+	slog.Info("formatVerboseTool input", "tool", tool, "input_raw", string(input), "len", len(input))
 	if len(input) == 0 || string(input) == "null" || string(input) == "{}" {
 		return tool + "..."
 	}
 	var args struct {
-		FilePath string `json:"filePath"`
-		Path     string `json:"path"`
-		Pattern  string `json:"pattern"`
-		Command  string `json:"command"`
-		Query    string `json:"query"`
-		URL      string `json:"url"`
-		Text     string `json:"text"`
-		Prompt   string `json:"prompt"`
+		Description string          `json:"description"`
+		Pattern     string          `json:"pattern"`
+		Command     string          `json:"command"`
+		Selector    string          `json:"selector"`
+		Element     string          `json:"element"`
+		FilePath    string          `json:"filePath"`
+		Path        string          `json:"path"`
+		Name        string          `json:"name"`
+		Query       string          `json:"query"`
+		URL         string          `json:"url"`
+		Category    string          `json:"category"`
+		Prompt      string          `json:"prompt"`
+		Text        string          `json:"text"`
+		Content     string          `json:"content"`
+		Todos       json.RawMessage `json:"todos"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return tool + "..."
 	}
 	s := ""
 	switch {
+	case args.Description != "":
+		s = args.Description
 	case args.Pattern != "":
 		s = args.Pattern
+	case args.Command != "":
+		s = args.Command
+	case args.Selector != "":
+		s = args.Selector
+	case args.Element != "":
+		s = args.Element
 	case args.FilePath != "":
 		s = args.FilePath
 	case args.Path != "":
 		s = args.Path
-	case args.Command != "":
-		s = args.Command
+	case args.Name != "":
+		s = args.Name
 	case args.Query != "":
 		s = args.Query
 	case args.URL != "":
 		s = args.URL
+	case args.Category != "":
+		s = args.Category
 	case args.Prompt != "":
 		s = args.Prompt
 	case args.Text != "":
 		s = args.Text
+	case args.Content != "":
+		s = args.Content
+	case len(args.Todos) > 0:
+		var todos []struct {
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(args.Todos, &todos) == nil && len(todos) > 0 && todos[0].Content != "" {
+			s = todos[0].Content
+		}
 	}
 	if s == "" {
 		return tool + "..."

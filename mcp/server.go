@@ -147,14 +147,14 @@ func (s *Server) nextSeq() int {
 
 type jsonRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      json.Number     `json:"id"`
+	ID      interface{}     `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
 type jsonRPCResponse struct {
 	JSONRPC string      `json:"jsonrpc"`
-	ID      json.Number `json:"id"`
+	ID      interface{} `json:"id"`
 	Result  interface{} `json:"result,omitempty"`
 	Error   *rpcError   `json:"error,omitempty"`
 }
@@ -333,7 +333,7 @@ func (s *Server) respond(w http.ResponseWriter, _ *http.Request, resp jsonRPCRes
 }
 
 // jsonRPCError is a convenience for respond with an error body.
-func (s *Server) jsonRPCError(w http.ResponseWriter, r *http.Request, id json.Number, code int, message string) {
+func (s *Server) jsonRPCError(w http.ResponseWriter, r *http.Request, id interface{}, code int, message string) {
 	s.respond(w, r, jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,

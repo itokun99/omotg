@@ -35,7 +35,8 @@ type PartData struct {
 }
 
 type PartState struct {
-	Status string `json:"status"`
+	Status string          `json:"status"`
+	Input  json.RawMessage `json:"input,omitempty"`
 }
 
 var toolEmoji = map[string]string{
@@ -208,13 +209,14 @@ func (c *OCClient) SendMessageWithAgent(ctx context.Context, sessionID, prompt, 
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		errBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("send message: status %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody)))
+		return "", fmt.Errorf("send message: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	var msgResp sendMessageResponse
-	if err := json.NewDecoder(resp.Body).Decode(&msgResp); err != nil {
+	if err := json.Unmarshal(respBody, &msgResp); err != nil {
 		return "", fmt.Errorf("decode send message response: %w", err)
 	}
 
